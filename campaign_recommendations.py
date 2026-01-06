@@ -23,6 +23,10 @@ from typing import Dict, Any
 import openai
 import pandas as pd
 import typesense
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 def find_keyword_column(df: pd.DataFrame) -> str:

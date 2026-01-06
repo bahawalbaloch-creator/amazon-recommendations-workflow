@@ -1,8 +1,6 @@
 """
-Streamlit dashboard to look up campaigns stored in Typesense.
-
-Assumes you've ingested campaigns into a Typesense collection, e.g.:
-  - amazon_ads_sponsored_products_campaign_l30
+Amazon Ads Campaign Analytics Dashboard
+Powered by Typesense for fast lookups and GPT for AI recommendations.
 
 Run:
   streamlit run typesense_campaign_dashboard.py
@@ -13,73 +11,140 @@ import os
 import pandas as pd
 import streamlit as st
 import typesense
-from campaign_recommendations import generate_recommendations, generate_recommendations_streaming
+from dotenv import load_dotenv
+from campaign_recommendations import generate_recommendations_streaming
 
+# Load environment variables from .env file
+load_dotenv()
+
+
+# ==================== CONFIGURATION ====================
+
+st.set_page_config(
+    page_title="Amazon Ads Analytics",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Custom CSS for professional look
+st.markdown("""
+<style>
+    /* Main header styling */
+    .main-header {
+        background: linear-gradient(135deg, #232F3E 0%, #37475A 100%);
+        padding: 1.5rem 2rem;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+        color: white;
+    }
+    .main-header h1 {
+        margin: 0;
+        font-size: 2rem;
+        font-weight: 600;
+    }
+    .main-header p {
+        margin: 0.5rem 0 0 0;
+        opacity: 0.9;
+        font-size: 1rem;
+    }
+    
+    /* Section headers */
+    .section-header {
+        background: #f8f9fa;
+        padding: 0.75rem 1rem;
+        border-left: 4px solid #FF9900;
+        margin: 1.5rem 0 1rem 0;
+        font-weight: 600;
+        font-size: 1.1rem;
+    }
+    
+    /* Card styling */
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border: 1px solid #e0e0e0;
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        width: 100%;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: #f8f9fa;
+    }
+    
+    /* Hide streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Dropdown full width */
+    div[data-baseweb="select"] span {
+        overflow: visible !important;
+        text-overflow: initial !important;
+        white-space: normal !important;
+    }
+    div[data-baseweb="select"] {
+        max-width: 100% !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ==================== HELPER FUNCTIONS ====================
 
 @st.cache_resource
 def get_client():
-    return typesense.Client(
-        {
-            "nodes": [
-                {
-                    "host": os.getenv("TYPESENSE_HOST", "localhost"),
-                    "port": int(os.getenv("TYPESENSE_PORT", "8108")),
-                    "protocol": os.getenv("TYPESENSE_PROTOCOL", "http"),
-                }
-            ],
-            "api_key": os.getenv("TYPESENSE_API_KEY", "mykey"),
-            "connection_timeout_seconds": 5,
-        }
-    )
+    return typesense.Client({
+        "nodes": [{
+            "host": os.getenv("TYPESENSE_HOST", "localhost"),
+            "port": int(os.getenv("TYPESENSE_PORT", "8108")),
+            "protocol": os.getenv("TYPESENSE_PROTOCOL", "http"),
+        }],
+        "api_key": os.getenv("TYPESENSE_API_KEY", "mykey"),
+        "connection_timeout_seconds": 5,
+    })
 
 
 def list_collections(client):
     cols = client.collections.retrieve()
-    # Show only collections that look like campaign data by default
     return [c["name"] for c in cols]
 
 
 def get_campaign_field_name(client, collection: str) -> str:
-    """Try to detect the best field to search campaigns on for this collection."""
     schema = client.collections[collection].retrieve()
     field_names = [f["name"] for f in schema.get("fields", [])]
-
-    # Prefer common campaign field variants
     for candidate in ["campaign_name", "campaign"]:
         if candidate in field_names:
             return candidate
-
-    # Fallback: first field containing 'campaign'
     for name in field_names:
         if "campaign" in name:
             return name
-
-    # Last resort: just use the first string field
     for f in schema.get("fields", []):
         if f.get("type") == "string":
             return f["name"]
-
-    # If everything fails, use 'id'
     return "id"
 
 
 def search_campaigns(client, collection, query, limit=50):
-    """Search a single collection for the campaign string and return docs + field used."""
     if not query:
         return [], "campaign"
     query_field = get_campaign_field_name(client, collection)
-    res = client.collections[collection].documents.search(
-        {
-            "q": query,
-            "query_by": query_field,
-            "per_page": limit,
-        }
-    )
+    res = client.collections[collection].documents.search({
+        "q": query,
+        "query_by": query_field,
+        "per_page": limit,
+    })
     return [h["document"] for h in res.get("hits", [])], query_field
 
 
 def detect_fields(client, collection: str):
-    """Infer key fields used for keyword analysis."""
     schema = client.collections[collection].retrieve()
     field_names = [f["name"] for f in schema.get("fields", [])]
 
@@ -92,39 +157,27 @@ def detect_fields(client, collection: str):
                 return name
         return default
 
-    campaign_field = get_campaign_field_name(client, collection)
-    keyword_field = pick(["customer_search_term", "search_term", "keyword", "term", "targeting"], default=None)
-    impressions_field = pick(["impressions", "impression"], default=None)
-    clicks_field = pick(["clicks", "click"], default=None)
-    match_field = pick(["match_type", "matchtype", "matchtype_raw"], default=None)
-    targeting_field = pick(["targeting", "target"], default=None)
-
     return {
-        "campaign": campaign_field,
-        "keyword": keyword_field,
-        "impressions": impressions_field,
-        "clicks": clicks_field,
-        "match_type": match_field,
-        "targeting": targeting_field,
+        "campaign": get_campaign_field_name(client, collection),
+        "keyword": pick(["customer_search_term", "search_term", "keyword", "term", "targeting"]),
+        "impressions": pick(["impressions", "impression"]),
+        "clicks": pick(["clicks", "click"]),
+        "match_type": pick(["match_type", "matchtype"]),
+        "targeting": pick(["targeting", "target"]),
     }
 
 
 def fetch_campaign_docs(client, collection: str, campaign: str, limit: int = 500):
-    """Fetch documents for a campaign from a collection, returning docs + field info."""
     fields = detect_fields(client, collection)
     campaign_field = fields["campaign"]
     if not campaign_field:
         raise ValueError(f"Cannot infer campaign field for collection {collection}")
-
-    res = client.collections[collection].documents.search(
-        {
-            "q": campaign,
-            "query_by": campaign_field,
-            "per_page": limit,
-        }
-    )
-    docs = [h["document"] for h in res.get("hits", [])]
-    return docs, fields
+    res = client.collections[collection].documents.search({
+        "q": campaign,
+        "query_by": campaign_field,
+        "per_page": limit,
+    })
+    return [h["document"] for h in res.get("hits", [])], fields
 
 
 def compute_ctr(df: pd.DataFrame, clicks_field: str, impressions_field: str):
@@ -137,7 +190,6 @@ def compute_ctr(df: pd.DataFrame, clicks_field: str, impressions_field: str):
 
 
 def aggregate_keywords(df: pd.DataFrame, fields: dict):
-    """Group by keyword to show unique terms with aggregated stats."""
     keyword_field = fields.get("keyword")
     impressions_field = fields.get("impressions")
     clicks_field = fields.get("clicks")
@@ -149,245 +201,311 @@ def aggregate_keywords(df: pd.DataFrame, fields: dict):
     if impressions_field not in df.columns or clicks_field not in df.columns:
         return df
 
-    agg_map = {
-        impressions_field: "sum",
-        clicks_field: "sum",
-    }
-    # Keep a representative match_type/targeting value (first non-null)
+    agg_map = {impressions_field: "sum", clicks_field: "sum"}
     if match_field and match_field in df.columns:
         agg_map[match_field] = lambda x: next((v for v in x if pd.notna(v)), None)
     if targeting_field and targeting_field in df.columns:
         agg_map[targeting_field] = lambda x: next((v for v in x if pd.notna(v)), None)
 
-    grouped = (
-        df.groupby(keyword_field, as_index=False)
-        .agg(agg_map)
-        .reset_index(drop=True)
-    )
-    return grouped
+    return df.groupby(keyword_field, as_index=False).agg(agg_map).reset_index(drop=True)
 
+
+# ==================== MAIN APP ====================
 
 def main():
-    st.set_page_config(page_title="Campaign Lookup (Typesense)", layout="wide")
-    st.title("Campaign Lookup using Typesense")
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>📊 Amazon Ads Campaign Analytics</h1>
+        <p>AI-Powered Campaign Optimization • Real-time Search • Keyword Insights</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.sidebar.header("Typesense Settings")
-    st.sidebar.write("Make sure Typesense is running and data is ingested.")
-
-    client = get_client()
-    collections = list_collections(client)
-
-    if not collections:
-        st.error("No collections found in Typesense. Run the ingestion script first.")
+    # Initialize Typesense client
+    try:
+        client = get_client()
+        collections = list_collections(client)
+    except Exception as e:
+        st.error(f"❌ Failed to connect to Typesense: {e}")
+        st.info("Make sure Typesense is running and accessible.")
         return
 
-    default_collection = "amazon_ads_sponsored_products_campaign_l30"
-    default_index = max(collections.index(default_collection), 0) if default_collection in collections else 0
+    if not collections:
+        st.warning("⚠️ No collections found in Typesense. Run the ingestion script first.")
+        st.code("python typesense_ingest.py --api-key mykey --drop-existing", language="bash")
+        return
 
-    # Make the dropdown show full collection names (no ellipsis)
-    st.sidebar.markdown(
-        """
-        <style>
-        /* Widen dropdown and allow text to wrap/overflow visibly */
-        div[data-baseweb="select"] span {
-            overflow: visible !important;
-            text-overflow: initial !important;
-            white-space: normal !important;
-        }
-        div[data-baseweb="select"] {
-            max-width: 100% !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    selected_collections = st.sidebar.multiselect(
-        "Collections to search",
-        options=collections,
-        default=[collections[default_index]] if collections else [],
-        placeholder="Select one or more collections",
-    )
+    # ==================== SIDEBAR ====================
+    with st.sidebar:
+        st.markdown("### ⚙️ Configuration")
+        
+        # Collection selector
+        st.markdown("**Data Collections**")
+        default_collection = "amazon_ads_sponsored_products_campaign_l30"
+        default_idx = collections.index(default_collection) if default_collection in collections else 0
+        
+        selected_collections = st.multiselect(
+            "Select collections",
+            options=collections,
+            default=[collections[default_idx]] if collections else [],
+            help="Choose which data sources to search",
+        )
+        
+        st.divider()
+        
+        # API Settings
+        st.markdown("**API Settings**")
+        api_key_input = st.text_input(
+            "OpenAI API Key",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            type="password",
+            help="Required for AI recommendations",
+        )
+        model_input = st.selectbox(
+            "GPT Model",
+            options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+            index=0,
+        )
+        
+        st.divider()
+        
+        # Analysis Parameters
+        st.markdown("**Analysis Parameters**")
+        top_n = st.slider("Top N keywords", 5, 100, 20, 5)
+        min_impr = st.slider("Min impressions", 0, 1000, 50, 10)
+        low_ctr_threshold = st.slider("Low CTR threshold (%)", 0.0, 10.0, 1.0, 0.1)
+        limit = st.slider("Max results", 50, 500, 200, 50)
 
-    query = st.text_input("Campaign name contains", "")
-    limit = st.slider("Max results per collection", min_value=10, max_value=500, value=200, step=10)
+    # ==================== MAIN CONTENT ====================
+    
+    # Campaign Input - Main focus
+    st.markdown('<div class="section-header">🎯 Campaign Selection</div>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        campaign_name = st.text_input(
+            "Enter Campaign Name",
+            placeholder="Type campaign name to search...",
+            help="Enter the full or partial campaign name",
+            label_visibility="collapsed",
+        )
+    with col2:
+        search_btn = st.button("🔍 Search", type="primary", use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("Keyword performance for a campaign (best / low CTR)")
-    campaign_exact = st.text_input("Campaign name (exact match preferred)", value=query)
-    top_n = st.slider("Top N rows to show", min_value=5, max_value=100, value=20, step=5)
-    min_impr = st.slider("Min impressions to consider", min_value=0, max_value=1000, value=50, step=10)
-    low_ctr_threshold = st.slider("Low CTR threshold (%)", min_value=0.0, max_value=10.0, value=1.0, step=0.1)
-    api_key_input = st.text_input("OpenAI API key (optional, uses OPENAI_API_KEY if blank)", value=os.getenv("OPENAI_API_KEY", ""))
-    model_input = st.text_input("OpenAI model", value="gpt-4o-mini")
-    data_dir_input = st.text_input("Reports data directory", value=os.getenv("DATA_DIR", "./data"))
+    if not selected_collections:
+        st.info("👈 Select at least one collection from the sidebar to begin.")
+        return
 
-    if st.button("Search across collections") and query:
-        if not selected_collections:
-            st.warning("Select at least one collection.")
-            return
+    # ==================== TABS FOR DIFFERENT VIEWS ====================
+    
+    tab1, tab2, tab3 = st.tabs(["📋 Campaign Data", "🔑 Keyword Analysis", "🤖 AI Recommendations"])
 
-        results = []
-        for col in selected_collections:
-            try:
-                docs, field_used = search_campaigns(client, col, query, limit=limit)
-                results.append((col, field_used, docs))
-            except Exception as e:
-                results.append((col, "error", f"Error: {e}"))
-
-        tabs = st.tabs([name for name, _, _ in results])
-        for tab, (col, field_used, docs) in zip(tabs, results):
-            with tab:
-                if isinstance(docs, str):
-                    st.error(docs)
-                    continue
-                st.caption(f"Query field: `{field_used}`")
-                if not docs:
-                    st.warning("No campaigns found.")
-                else:
-                    df = pd.DataFrame(docs)
-                    st.write(f"Found {len(df)} rows")
-                    st.dataframe(df)
-
-    if st.button("Get keyword insights") and campaign_exact:
-        if not selected_collections:
-            st.warning("Select at least one collection.")
-            return
-
-        tabs = st.tabs(selected_collections)
-        for tab, col in zip(tabs, selected_collections):
-            with tab:
+    # ==================== TAB 1: CAMPAIGN DATA ====================
+    with tab1:
+        st.markdown('<div class="section-header">Campaign Search Results</div>', unsafe_allow_html=True)
+        
+        if search_btn and campaign_name:
+            results = []
+            for col in selected_collections:
                 try:
-                    docs, fields = fetch_campaign_docs(client, col, campaign_exact, limit=limit)
+                    docs, field_used = search_campaigns(client, col, campaign_name, limit=limit)
+                    results.append((col, field_used, docs))
                 except Exception as e:
-                    st.error(f"Error fetching from {col}: {e}")
-                    continue
+                    results.append((col, "error", f"Error: {e}"))
 
-                keyword_field = fields["keyword"]
-                impressions_field = fields["impressions"]
-                clicks_field = fields["clicks"]
-
-                if not keyword_field or not impressions_field or not clicks_field:
-                    st.warning(
-                        f"Missing required fields in {col}. "
-                        f"Need keyword (~search_term/keyword), impressions, clicks."
-                    )
-                    continue
-
-                df = pd.DataFrame(docs)
-                if df.empty:
-                    st.warning("No rows found for this campaign.")
-                    continue
-
-                # Ensure numeric for metrics
-                for col in [impressions_field, clicks_field]:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-                # Aggregate by keyword to show unique terms
-                df = aggregate_keywords(df, fields)
-
-                df = compute_ctr(df, clicks_field, impressions_field)
-                df = df[df[impressions_field] >= min_impr]
-
-                if df.empty:
-                    st.warning(f"No rows meet impression threshold ({min_impr}).")
-                    continue
-
-                # Best: require clicks and CTR above threshold, then rank by CTR desc, impressions desc
-                best = (
-                    df[
-                        (df[clicks_field].astype(float) > 0)
-                        & (df["ctr_calc"] > low_ctr_threshold)
-                    ]
-                    .sort_values(["ctr_calc", impressions_field], ascending=[False, False])
-                    .head(top_n)
-                    .reset_index(drop=True)
-                )
-
-                # Low CTR: high impressions but CTR at/below threshold (or zero clicks)
-                worst = (
-                    df[
-                        (df[impressions_field] >= min_impr)
-                        & ((df["ctr_calc"] <= low_ctr_threshold) | (df[clicks_field].astype(float) == 0))
-                    ]
-                    .sort_values([impressions_field, "ctr_calc"], ascending=[False, True])
-                    .head(top_n)
-                    .reset_index(drop=True)
-                )
-
-                st.caption(
-                    f"Fields: keyword=`{keyword_field}`, impressions=`{impressions_field}`, "
-                    f"clicks=`{clicks_field}`, campaign=`{fields['campaign']}`, "
-                    f"match_type=`{fields.get('match_type')}`, targeting=`{fields.get('targeting')}`"
-                )
-
-                display_cols = [keyword_field, impressions_field, clicks_field, "ctr_calc"]
-                if fields.get("match_type") and fields["match_type"] in df.columns:
-                    display_cols.insert(1, fields["match_type"])
-                if fields.get("targeting") and fields["targeting"] in df.columns:
-                    display_cols.insert(1, fields["targeting"])
-
-                st.write("**Best keywords (high impressions & CTR)**")
-                st.dataframe(best[[c for c in display_cols if c in best.columns]])
-
-                st.write("**Low CTR keywords (high impressions, low CTR)**")
-                st.dataframe(worst[[c for c in display_cols if c in worst.columns]])
-
-    # --- GPT recommendations ---
-    if st.button("Generate GPT recommendations") and campaign_exact:
-        api_key = api_key_input or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            st.error("Missing OpenAI API key.")
+            if results:
+                sub_tabs = st.tabs([name.split("_")[-1] for name, _, _ in results])
+                for sub_tab, (col, field_used, docs) in zip(sub_tabs, results):
+                    with sub_tab:
+                        if isinstance(docs, str):
+                            st.error(docs)
+                        elif not docs:
+                            st.warning("No matching campaigns found.")
+                        else:
+                            st.caption(f"Collection: `{col}` | Query field: `{field_used}`")
+                            st.metric("Rows Found", len(docs))
+                            st.dataframe(pd.DataFrame(docs), use_container_width=True)
         else:
-            try:
-                st.subheader("GPT Recommendations")
-                st.info("🔄 Streaming response...")
-                
-                # Create a placeholder for streaming text
-                response_placeholder = st.empty()
-                full_text = ""
-                output_file = None
-                
-                # Stream the recommendations
-                for chunk in generate_recommendations_streaming(
-                    campaign=campaign_exact,
-                    ts_host=os.getenv("TYPESENSE_HOST", "localhost"),
-                    ts_port=int(os.getenv("TYPESENSE_PORT", "8108")),
-                    ts_protocol=os.getenv("TYPESENSE_PROTOCOL", "http"),
-                    ts_api_key=os.getenv("TYPESENSE_API_KEY", "mykey"),
-                    api_key=api_key,
-                    model=model_input or "gpt-4o-mini",
-                    top_n=top_n,
-                    min_impr=min_impr,
-                ):
-                    # Check if this is the final metadata chunk
-                    if isinstance(chunk, dict) and chunk.get("complete"):
-                        output_file = chunk.get("output_file")
-                        full_text = chunk.get("full_text", full_text)
-                    else:
-                        # Accumulate text and update display
-                        full_text += chunk
-                        # Display as markdown for proper formatting during streaming
-                        response_placeholder.markdown(full_text + "▌")
-                
-                # Final display without cursor
-                response_placeholder.markdown(full_text)
-                
-                # Show success message with file path
-                if output_file:
-                    st.success(f"✅ Saved to: {output_file}")
-                
-                # Copy button using code block
-                st.divider()
-                st.caption("📋 Click the copy icon (top-right) to copy recommendations:")
-                st.code(full_text, language="markdown")
-                
-            except FileNotFoundError as e:
-                st.error(str(e))
-            except Exception as e:
-                st.error(f"Failed to generate recommendations: {e}")
+            st.info("Enter a campaign name and click **Search** to view campaign data.")
+
+    # ==================== TAB 2: KEYWORD ANALYSIS ====================
+    with tab2:
+        st.markdown('<div class="section-header">Keyword Performance Analysis</div>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            keyword_campaign = st.text_input(
+                "Campaign for keyword analysis",
+                value=campaign_name,
+                key="keyword_campaign",
+                placeholder="Enter exact campaign name...",
+                label_visibility="collapsed",
+            )
+        with col2:
+            keyword_btn = st.button("📊 Analyze Keywords", type="secondary", use_container_width=True)
+
+        if keyword_btn and keyword_campaign:
+            for col_name in selected_collections:
+                with st.expander(f"📁 {col_name}", expanded=True):
+                    try:
+                        docs, fields = fetch_campaign_docs(client, col_name, keyword_campaign, limit=limit)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        continue
+
+                    keyword_field = fields["keyword"]
+                    impressions_field = fields["impressions"]
+                    clicks_field = fields["clicks"]
+
+                    if not keyword_field or not impressions_field or not clicks_field:
+                        st.warning("Missing required fields (keyword, impressions, clicks).")
+                        continue
+
+                    df = pd.DataFrame(docs)
+                    if df.empty:
+                        st.warning("No data found for this campaign.")
+                        continue
+
+                    # Ensure numeric
+                    for c in [impressions_field, clicks_field]:
+                        if c in df.columns:
+                            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+                    df = aggregate_keywords(df, fields)
+                    df = compute_ctr(df, clicks_field, impressions_field)
+                    df = df[df[impressions_field] >= min_impr]
+
+                    if df.empty:
+                        st.warning(f"No keywords meet the impression threshold ({min_impr}).")
+                        continue
+
+                    # Best keywords
+                    best = (
+                        df[(df[clicks_field].astype(float) > 0) & (df["ctr_calc"] > low_ctr_threshold)]
+                        .sort_values(["ctr_calc", impressions_field], ascending=[False, False])
+                        .head(top_n)
+                        .reset_index(drop=True)
+                    )
+
+                    # Low CTR keywords
+                    worst = (
+                        df[(df[impressions_field] >= min_impr) & 
+                           ((df["ctr_calc"] <= low_ctr_threshold) | (df[clicks_field].astype(float) == 0))]
+                        .sort_values([impressions_field, "ctr_calc"], ascending=[False, True])
+                        .head(top_n)
+                        .reset_index(drop=True)
+                    )
+
+                    display_cols = [keyword_field, impressions_field, clicks_field, "ctr_calc"]
+                    if fields.get("match_type") and fields["match_type"] in df.columns:
+                        display_cols.insert(1, fields["match_type"])
+                    if fields.get("targeting") and fields["targeting"] in df.columns:
+                        display_cols.insert(1, fields["targeting"])
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("**✅ Top Performing Keywords**")
+                        st.dataframe(
+                            best[[c for c in display_cols if c in best.columns]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    with col_b:
+                        st.markdown("**⚠️ Underperforming Keywords**")
+                        st.dataframe(
+                            worst[[c for c in display_cols if c in worst.columns]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+        else:
+            st.info("Enter a campaign name and click **Analyze Keywords** to see keyword performance.")
+
+    # ==================== TAB 3: AI RECOMMENDATIONS ====================
+    with tab3:
+        st.markdown('<div class="section-header">AI-Powered Optimization Recommendations</div>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            rec_campaign = st.text_input(
+                "Campaign for AI analysis",
+                value=campaign_name,
+                key="rec_campaign",
+                placeholder="Enter exact campaign name...",
+                label_visibility="collapsed",
+            )
+        with col2:
+            rec_btn = st.button("🤖 Generate Recommendations", type="primary", use_container_width=True)
+
+        if rec_btn and rec_campaign:
+            api_key = api_key_input or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                st.error("❌ OpenAI API key is required. Add it in the sidebar.")
+            else:
+                try:
+                    # Status indicator
+                    status = st.status("Generating AI recommendations...", expanded=True)
+                    
+                    with status:
+                        st.write("🔄 Fetching campaign data from Typesense...")
+                        st.write("📊 Computing metrics...")
+                        st.write("🤖 Streaming GPT response...")
+                    
+                    # Streaming response container
+                    response_container = st.container()
+                    with response_container:
+                        response_placeholder = st.empty()
+                        full_text = ""
+                        output_file = None
+
+                        for chunk in generate_recommendations_streaming(
+                            campaign=rec_campaign,
+                            ts_host=os.getenv("TYPESENSE_HOST", "localhost"),
+                            ts_port=int(os.getenv("TYPESENSE_PORT", "8108")),
+                            ts_protocol=os.getenv("TYPESENSE_PROTOCOL", "http"),
+                            ts_api_key=os.getenv("TYPESENSE_API_KEY", "mykey"),
+                            api_key=api_key,
+                            model=model_input or "gpt-4o-mini",
+                            top_n=top_n,
+                            min_impr=min_impr,
+                        ):
+                            if isinstance(chunk, dict) and chunk.get("complete"):
+                                output_file = chunk.get("output_file")
+                                full_text = chunk.get("full_text", full_text)
+                            else:
+                                full_text += chunk
+                                response_placeholder.markdown(full_text + "▌")
+
+                        # Final display
+                        response_placeholder.markdown(full_text)
+                    
+                    status.update(label="✅ Recommendations generated!", state="complete")
+
+                    # Success info
+                    if output_file:
+                        st.success(f"📁 Saved to: `{output_file}`")
+
+                    # Copy section
+                    with st.expander("📋 Copy Recommendations", expanded=False):
+                        st.code(full_text, language="markdown")
+
+                except FileNotFoundError as e:
+                    st.error(f"❌ {e}")
+                except Exception as e:
+                    st.error(f"❌ Failed to generate recommendations: {e}")
+        else:
+            st.info("Enter a campaign name and click **Generate Recommendations** for AI-powered optimization insights.")
+            
+            # Show what the AI can do
+            st.markdown("""
+            **What you'll get:**
+            - 📈 Budget optimization recommendations
+            - 💰 Bid strategy adjustments
+            - 🎯 Placement optimization
+            - 🔑 Keyword expansion opportunities
+            - 🚫 Negative keyword suggestions
+            - ⚡ Quick wins for immediate impact
+            """)
 
 
 if __name__ == "__main__":
     main()
-
