@@ -133,6 +133,45 @@ def list_collections(client):
     return [c["name"] for c in cols]
 
 
+def get_collection_stats(client):
+    """Get stats for all collections."""
+    logger.info("Fetching collection stats...")
+    cols = client.collections.retrieve()
+    stats = []
+    for c in cols:
+        stats.append({
+            "name": c["name"],
+            "num_documents": c.get("num_documents", 0),
+            "num_fields": len(c.get("fields", [])),
+            "created_at": c.get("created_at", "N/A"),
+        })
+    return stats
+
+
+def get_collection_schema(client, collection_name: str):
+    """Get detailed schema for a collection."""
+    logger.info(f"Fetching schema for '{collection_name}'...")
+    schema = client.collections[collection_name].retrieve()
+    return schema
+
+
+def run_typesense_query(client, collection_name: str, query: str, query_by: str, 
+                         filter_by: str = "", per_page: int = 20):
+    """Run a search query against a collection."""
+    logger.info(f"Running query on '{collection_name}': q='{query}', query_by='{query_by}'")
+    search_params = {
+        "q": query if query else "*",
+        "query_by": query_by,
+        "per_page": per_page,
+    }
+    if filter_by:
+        search_params["filter_by"] = filter_by
+    
+    result = client.collections[collection_name].documents.search(search_params)
+    logger.info(f"Query returned {result.get('found', 0)} results")
+    return result
+
+
 def get_campaign_field_name(client, collection: str) -> str:
     schema = client.collections[collection].retrieve()
     field_names = [f["name"] for f in schema.get("fields", [])]
@@ -247,6 +286,8 @@ def init_session_state():
         st.session_state.ai_recommendations = None
     if "ai_output_file" not in st.session_state:
         st.session_state.ai_output_file = None
+    if "explorer_query_results" not in st.session_state:
+        st.session_state.explorer_query_results = None
 
 
 def main():
@@ -343,7 +384,7 @@ def main():
 
     # ==================== TABS FOR DIFFERENT VIEWS ====================
     
-    tab1, tab2, tab3 = st.tabs(["📋 Campaign Data", "🔑 Keyword Analysis", "🤖 AI Recommendations"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Campaign Data", "🔑 Keyword Analysis", "🤖 AI Recommendations", "🗄️ Typesense Explorer"])
 
     # ==================== TAB 1: CAMPAIGN DATA ====================
     with tab1:
@@ -628,6 +669,216 @@ def main():
             - 🚫 Negative keyword suggestions
             - ⚡ Quick wins for immediate impact
             """)
+
+    # ==================== TAB 4: TYPESENSE EXPLORER ====================
+    with tab4:
+        st.markdown('<div class="section-header">Typesense Data Explorer</div>', unsafe_allow_html=True)
+        
+        # Collection Stats Section
+        st.markdown("### 📊 Collection Statistics")
+        
+        try:
+            stats = get_collection_stats(client)
+            
+            if stats:
+                # Create metrics cards
+                cols = st.columns(len(stats))
+                for i, stat in enumerate(stats):
+                    with cols[i]:
+                        short_name = stat["name"].replace("amazon_ads_", "").replace("_", " ").title()
+                        st.metric(
+                            label=short_name[:20] + "..." if len(short_name) > 20 else short_name,
+                            value=f"{stat['num_documents']:,}",
+                            help=f"Collection: {stat['name']}"
+                        )
+                
+                # Detailed stats table
+                with st.expander("📋 Detailed Collection Stats", expanded=False):
+                    stats_df = pd.DataFrame(stats)
+                    stats_df.columns = ["Collection Name", "Documents", "Fields", "Created At"]
+                    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+            else:
+                st.warning("No collections found.")
+        except Exception as e:
+            st.error(f"Error fetching stats: {e}")
+        
+        st.divider()
+        
+        # Schema Viewer Section
+        st.markdown("### 🔍 Schema Viewer")
+        
+        schema_col = st.selectbox(
+            "Select collection to view schema",
+            options=collections,
+            key="schema_collection",
+        )
+        
+        if schema_col:
+            try:
+                schema = get_collection_schema(client, schema_col)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Documents", f"{schema.get('num_documents', 0):,}")
+                with col2:
+                    st.metric("Fields", len(schema.get("fields", [])))
+                
+                # Fields table
+                fields = schema.get("fields", [])
+                if fields:
+                    fields_data = []
+                    for f in fields:
+                        fields_data.append({
+                            "Field Name": f.get("name", ""),
+                            "Type": f.get("type", ""),
+                            "Facet": "✓" if f.get("facet") else "✗",
+                            "Index": "✓" if f.get("index", True) else "✗",
+                            "Optional": "✓" if f.get("optional") else "✗",
+                        })
+                    st.dataframe(pd.DataFrame(fields_data), use_container_width=True, hide_index=True)
+                
+                # Raw schema JSON
+                with st.expander("📄 Raw Schema JSON", expanded=False):
+                    st.json(schema)
+                    
+            except Exception as e:
+                st.error(f"Error fetching schema: {e}")
+        
+        st.divider()
+        
+        # Query Runner Section
+        st.markdown("### 🔎 Query Runner")
+        
+        query_col = st.selectbox(
+            "Select collection to query",
+            options=collections,
+            key="query_collection",
+        )
+        
+        if query_col:
+            # Get available fields for query_by
+            try:
+                schema = get_collection_schema(client, query_col)
+                string_fields = [f["name"] for f in schema.get("fields", []) 
+                                if f.get("type") in ["string", "string[]"]]
+                all_fields = [f["name"] for f in schema.get("fields", [])]
+            except:
+                string_fields = ["id"]
+                all_fields = ["id"]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                query_text = st.text_input(
+                    "Search query",
+                    value="*",
+                    placeholder="Enter search term or * for all",
+                    key="explorer_query_text",
+                )
+            with col2:
+                query_by = st.selectbox(
+                    "Query by field",
+                    options=string_fields if string_fields else ["id"],
+                    key="explorer_query_by",
+                )
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                filter_by = st.text_input(
+                    "Filter (optional)",
+                    placeholder="e.g., impressions:>100",
+                    help="Typesense filter syntax: field:value, field:>value, field:[val1,val2]",
+                    key="explorer_filter",
+                )
+            with col4:
+                per_page = st.number_input(
+                    "Results per page",
+                    min_value=1,
+                    max_value=250,
+                    value=20,
+                    key="explorer_per_page",
+                )
+            
+            col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
+            with col_btn1:
+                run_query_btn = st.button("▶️ Run Query", type="primary", use_container_width=True)
+            with col_btn2:
+                export_btn = st.button("📥 Export All", use_container_width=True, help="Export entire collection")
+            with col_btn3:
+                if st.button("🗑️ Clear", key="clear_explorer", use_container_width=True):
+                    st.session_state.explorer_query_results = None
+                    st.rerun()
+            
+            # Run query
+            if run_query_btn:
+                try:
+                    logger.info(f"Running explorer query: collection={query_col}, q={query_text}, query_by={query_by}")
+                    result = run_typesense_query(
+                        client, 
+                        query_col, 
+                        query_text, 
+                        query_by, 
+                        filter_by, 
+                        per_page
+                    )
+                    
+                    st.session_state.explorer_query_results = {
+                        "collection": query_col,
+                        "query": query_text,
+                        "result": result,
+                    }
+                except Exception as e:
+                    st.error(f"Query error: {e}")
+            
+            # Export collection
+            if export_btn:
+                try:
+                    with st.spinner("Exporting collection..."):
+                        export_str = client.collections[query_col].documents.export()
+                        if export_str:
+                            import json
+                            lines = [json.loads(line) for line in export_str.splitlines() if line.strip()]
+                            export_df = pd.DataFrame(lines)
+                            
+                            st.success(f"Exported {len(export_df):,} documents")
+                            st.download_button(
+                                "📥 Download CSV",
+                                data=export_df.to_csv(index=False),
+                                file_name=f"{query_col}_export.csv",
+                                mime="text/csv",
+                            )
+                        else:
+                            st.warning("Collection is empty")
+                except Exception as e:
+                    st.error(f"Export error: {e}")
+            
+            # Display results
+            if st.session_state.explorer_query_results:
+                results = st.session_state.explorer_query_results
+                result = results["result"]
+                
+                st.markdown(f"**Results for:** `{results['query']}` in `{results['collection']}`")
+                
+                # Stats
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Found", f"{result.get('found', 0):,}")
+                with col2:
+                    st.metric("Returned", len(result.get("hits", [])))
+                with col3:
+                    st.metric("Search Time", f"{result.get('search_time_ms', 0)} ms")
+                
+                # Results table
+                hits = result.get("hits", [])
+                if hits:
+                    docs = [h["document"] for h in hits]
+                    result_df = pd.DataFrame(docs)
+                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    
+                    # Raw JSON view
+                    with st.expander("📄 Raw JSON Results", expanded=False):
+                        st.json(result)
+                else:
+                    st.info("No documents found matching your query.")
 
 
 if __name__ == "__main__":
