@@ -15,7 +15,9 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
@@ -27,6 +29,15 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("recommendations")
 
 
 def find_keyword_column(df: pd.DataFrame) -> str:
@@ -281,18 +292,23 @@ def main():
 
 
 def find_collection(client: typesense.Client, pattern: str) -> str:
+    logger.debug(f"Looking for collection containing '{pattern}'")
     cols = client.collections.retrieve()
     for c in cols:
         if pattern in c["name"]:
+            logger.debug(f"Found collection: {c['name']}")
             return c["name"]
     raise FileNotFoundError(f"Missing collection containing '{pattern}' in Typesense")
 
 
 def fetch_collection_df(client: typesense.Client, name: str) -> pd.DataFrame:
+    logger.info(f"Exporting collection '{name}'...")
     export_str = client.collections[name].documents.export()
     if not export_str:
+        logger.warning(f"Collection '{name}' is empty")
         return pd.DataFrame()
     lines = [json.loads(line) for line in export_str.splitlines() if line.strip()]
+    logger.info(f"Exported {len(lines)} rows from '{name}'")
     return pd.DataFrame(lines)
 
 
@@ -319,11 +335,16 @@ def generate_recommendations(
     min_impr: int = 50,
 ) -> str:
     """Compute metrics from Typesense collections and return GPT recommendations as text."""
+    logger.info("=" * 60)
+    logger.info(f"GENERATING RECOMMENDATIONS FOR: {campaign}")
+    logger.info("=" * 60)
+    
     if not api_key:
         raise ValueError("Missing OpenAI API key.")
     if not ts_api_key:
         raise ValueError("Missing Typesense API key.")
 
+    logger.info(f"Connecting to Typesense at {ts_protocol}://{ts_host}:{ts_port}")
     client = typesense.Client(
         {
             "nodes": [{"host": ts_host, "port": ts_port, "protocol": ts_protocol}],
@@ -332,6 +353,7 @@ def generate_recommendations(
         }
     )
 
+    logger.info("Step 1: Finding required collections...")
     collections_map = {
         "search_terms": find_collection(client, "search_term"),
         "campaigns": find_collection(client, "campaign"),
@@ -339,36 +361,43 @@ def generate_recommendations(
         "placement": find_collection(client, "placement"),
         "budgets": find_collection(client, "budget"),
     }
+    logger.info(f"Collections found: {list(collections_map.values())}")
 
+    logger.info("Step 2: Fetching data from collections...")
     reports = {k: fetch_collection_df(client, v) for k, v in collections_map.items()}
 
-    # Step 2: Campaign filter
+    # Campaign filter
     campaign_name = campaign.lower()
     search_terms = reports["search_terms"]
     campaigns_df = reports["campaigns"]
     budgets = reports.get("budgets", pd.DataFrame())
 
-    # Find the campaign column in each dataframe (could be 'campaign' or 'campaign_name')
+    logger.info(f"Step 3: Filtering data for campaign '{campaign}'...")
     st_camp_col = find_campaign_column(search_terms)
     camp_camp_col = find_campaign_column(campaigns_df)
 
     search_terms = search_terms[search_terms[st_camp_col].str.lower() == campaign_name]
     campaigns_df = campaigns_df[campaigns_df[camp_camp_col].str.lower() == campaign_name]
+    logger.info(f"  - Search terms rows: {len(search_terms)}")
+    logger.info(f"  - Campaign rows: {len(campaigns_df)}")
 
     if budgets is not None and not budgets.empty:
         try:
             budget_camp_col = find_campaign_column(budgets)
             budgets = budgets[budgets[budget_camp_col].str.lower() == campaign_name]
+            logger.info(f"  - Budget rows: {len(budgets)}")
         except KeyError:
+            logger.warning("  - No budget column found")
             budgets = pd.DataFrame()
 
     if campaigns_df.empty:
+        logger.error(f"Campaign not found: {campaign}")
         raise ValueError(f"Campaign not found: {campaign}")
 
     # Normalize metric columns (handles 7_day_total_sales -> sales, etc.)
     campaigns_df = normalize_metrics(campaigns_df)
 
-    # Step 3: Campaign summary + budget
+    logger.info("Step 4: Computing campaign metrics...")
     campaign_summary = campaigns_df.groupby(camp_camp_col, as_index=False).agg(
         spend=("spend", "sum"),
         sales=("sales", "sum"),
@@ -382,14 +411,18 @@ def generate_recommendations(
     campaign_summary["acos"] = (campaign_summary["spend"] / campaign_summary["sales"].replace(0, 1)) * 100
     campaign_summary["roas"] = campaign_summary["sales"] / campaign_summary["spend"].replace(0, 1)
     campaign_summary = campaign_summary.replace([float("inf"), float("-inf")], 0)
+    
+    summary = campaign_summary.iloc[0] if len(campaign_summary) > 0 else {}
+    logger.info(f"  - Spend: ${summary.get('spend', 0):.2f}")
+    logger.info(f"  - Sales: ${summary.get('sales', 0):.2f}")
+    logger.info(f"  - ACOS: {summary.get('acos', 0):.2f}%")
+    logger.info(f"  - ROAS: {summary.get('roas', 0):.2f}x")
 
+    logger.info("Step 5: Processing budget data...")
     budget_info = {}
     if budgets is not None and not budgets.empty:
         budgets = normalize_metrics(budgets)
-        # Debug: print available columns and sample data
-        print(f"[DEBUG] Budget columns: {list(budgets.columns)}")
-        if len(budgets) > 0:
-            print(f"[DEBUG] Budget sample row: {budgets.iloc[0].to_dict()}")
+        logger.debug(f"Budget columns: {list(budgets.columns)}")
         
         budget_amt = 0
         if "budget_amount" in budgets.columns:
@@ -398,20 +431,23 @@ def generate_recommendations(
         budget_info = {
             "total_budget": budget_amt,
             "daily_budget": budget_amt / max(len(budgets), 1) if budget_amt > 0 else 0,
-            "rows": budgets.head(5).to_dict("records"),  # Limit rows to avoid huge payload
+            "rows": budgets.head(5).to_dict("records"),
         }
-        print(f"[DEBUG] Budget info: total={budget_amt}")
+        logger.info(f"  - Total budget: ${budget_amt:.2f}")
     else:
         budget_amt = float(campaign_summary["budget_amount"].iloc[0]) if "budget_amount" in campaign_summary.columns else 0
         budget_info = {"total_budget": budget_amt, "daily_budget": budget_amt}
-        print(f"[DEBUG] No budget rows found, using campaign summary budget: {budget_amt}")
+        logger.info(f"  - Budget from campaign: ${budget_amt:.2f}")
 
-    # Step 4: Keywords best/worst
+    logger.info("Step 6: Analyzing keywords...")
     keyword_rollup, best_keywords, worst_keywords = compute_keyword_metrics(
         search_terms, min_impr=min_impr, top_n=top_n
     )
+    logger.info(f"  - Total keywords: {len(keyword_rollup)}")
+    logger.info(f"  - Best keywords: {len(best_keywords)}")
+    logger.info(f"  - Worst keywords: {len(worst_keywords)}")
 
-    # Step 5: Build prompt and call GPT
+    logger.info("Step 7: Building GPT prompt...")
     payload = {
         "campaign_summary": campaign_summary.to_dict("records"),
         "budget": budget_info,
@@ -419,11 +455,11 @@ def generate_recommendations(
         "best_keywords": best_keywords,
         "worst_keywords": worst_keywords,
     }
-
-    openai_client = openai.OpenAI(api_key=api_key)
     prompt = build_prompt(payload)
-    
-    # Non-streaming call for backward compatibility
+    logger.info(f"  - Prompt length: {len(prompt)} chars")
+
+    logger.info(f"Step 8: Calling OpenAI API (model: {model})...")
+    openai_client = openai.OpenAI(api_key=api_key)
     response = openai_client.chat.completions.create(
         model=model,
         messages=[
@@ -433,9 +469,14 @@ def generate_recommendations(
         temperature=0.3,
     )
     recommendations_text = response.choices[0].message.content
+    logger.info(f"  - Response received: {len(recommendations_text)} chars")
 
-    # Save recommendations to markdown file
+    logger.info("Step 9: Saving recommendations...")
     output_file = save_recommendations_to_file(campaign, recommendations_text)
+    logger.info(f"  - Saved to: {output_file}")
+    logger.info("=" * 60)
+    logger.info("RECOMMENDATIONS COMPLETE")
+    logger.info("=" * 60)
     
     return recommendations_text, str(output_file)
 
@@ -470,20 +511,17 @@ def generate_recommendations_streaming(
 ):
     """
     Generator that yields recommendation text chunks as they stream from GPT.
-    
-    Usage:
-        full_text = ""
-        for chunk in generate_recommendations_streaming(...):
-            full_text += chunk
-            print(chunk, end="", flush=True)
-    
-    After iteration completes, returns (full_text, output_file_path) via final yield.
     """
+    logger.info("=" * 60)
+    logger.info(f"STREAMING RECOMMENDATIONS FOR: {campaign}")
+    logger.info("=" * 60)
+    
     if not api_key:
         raise ValueError("Missing OpenAI API key.")
     if not ts_api_key:
         raise ValueError("Missing Typesense API key.")
 
+    logger.info(f"Connecting to Typesense at {ts_protocol}://{ts_host}:{ts_port}")
     client = typesense.Client(
         {
             "nodes": [{"host": ts_host, "port": ts_port, "protocol": ts_protocol}],
@@ -492,6 +530,7 @@ def generate_recommendations_streaming(
         }
     )
 
+    logger.info("Finding collections...")
     collections_map = {
         "search_terms": find_collection(client, "search_term"),
         "campaigns": find_collection(client, "campaign"),
@@ -500,30 +539,36 @@ def generate_recommendations_streaming(
         "budgets": find_collection(client, "budget"),
     }
 
+    logger.info("Fetching data from collections...")
     reports = {k: fetch_collection_df(client, v) for k, v in collections_map.items()}
 
-    # Campaign filter
     campaign_name = campaign.lower()
     search_terms = reports["search_terms"]
     campaigns_df = reports["campaigns"]
     budgets = reports.get("budgets", pd.DataFrame())
 
+    logger.info(f"Filtering for campaign: {campaign}")
     st_camp_col = find_campaign_column(search_terms)
     camp_camp_col = find_campaign_column(campaigns_df)
 
     search_terms = search_terms[search_terms[st_camp_col].str.lower() == campaign_name]
     campaigns_df = campaigns_df[campaigns_df[camp_camp_col].str.lower() == campaign_name]
+    logger.info(f"  - Search terms: {len(search_terms)} rows")
+    logger.info(f"  - Campaigns: {len(campaigns_df)} rows")
 
     if budgets is not None and not budgets.empty:
         try:
             budget_camp_col = find_campaign_column(budgets)
             budgets = budgets[budgets[budget_camp_col].str.lower() == campaign_name]
+            logger.info(f"  - Budgets: {len(budgets)} rows")
         except KeyError:
             budgets = pd.DataFrame()
 
     if campaigns_df.empty:
+        logger.error(f"Campaign not found: {campaign}")
         raise ValueError(f"Campaign not found: {campaign}")
 
+    logger.info("Computing metrics...")
     campaigns_df = normalize_metrics(campaigns_df)
 
     campaign_summary = campaigns_df.groupby(camp_camp_col, as_index=False).agg(
@@ -549,13 +594,17 @@ def generate_recommendations_streaming(
             "daily_budget": budget_amt / max(len(budgets), 1) if budget_amt > 0 else 0,
             "rows": budgets.head(5).to_dict("records"),
         }
+        logger.info(f"  - Budget: ${budget_amt:.2f}")
     else:
         budget_amt = float(campaign_summary["budget_amount"].iloc[0]) if "budget_amount" in campaign_summary.columns else 0
         budget_info = {"total_budget": budget_amt, "daily_budget": budget_amt}
+        logger.info(f"  - Budget: ${budget_amt:.2f}")
 
+    logger.info("Analyzing keywords...")
     keyword_rollup, best_keywords, worst_keywords = compute_keyword_metrics(
         search_terms, min_impr=min_impr, top_n=top_n
     )
+    logger.info(f"  - Keywords: {len(keyword_rollup)} total, {len(best_keywords)} best, {len(worst_keywords)} worst")
 
     payload = {
         "campaign_summary": campaign_summary.to_dict("records"),
@@ -565,6 +614,7 @@ def generate_recommendations_streaming(
         "worst_keywords": worst_keywords,
     }
 
+    logger.info(f"Calling OpenAI API (model: {model}, streaming: true)...")
     openai_client = openai.OpenAI(api_key=api_key)
     prompt = build_prompt(payload)
     
@@ -579,15 +629,25 @@ def generate_recommendations_streaming(
         stream=True,
     )
     
+    logger.info("Streaming response...")
     full_text = ""
+    chunk_count = 0
     for chunk in stream:
         if chunk.choices[0].delta.content:
             content = chunk.choices[0].delta.content
             full_text += content
+            chunk_count += 1
             yield content
     
+    logger.info(f"Stream complete: {chunk_count} chunks, {len(full_text)} chars")
+    
     # Save to file after streaming completes
+    logger.info("Saving recommendations to file...")
     output_file = save_recommendations_to_file(campaign, full_text)
+    logger.info(f"Saved to: {output_file}")
+    logger.info("=" * 60)
+    logger.info("STREAMING COMPLETE")
+    logger.info("=" * 60)
     
     # Final yield with metadata (caller can check for dict type)
     yield {"complete": True, "output_file": str(output_file), "full_text": full_text}

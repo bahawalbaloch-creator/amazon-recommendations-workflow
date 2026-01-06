@@ -6,7 +6,9 @@ Run:
   streamlit run typesense_campaign_dashboard.py
 """
 
+import logging
 import os
+import sys
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +18,18 @@ from campaign_recommendations import generate_recommendations_streaming
 
 # Load environment variables from .env file
 load_dotenv()
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("Amazon Ads Analytics Dashboard starting...")
+logger.info("=" * 60)
 
 
 # ==================== CONFIGURATION ====================
@@ -101,19 +115,21 @@ st.markdown("""
 
 @st.cache_resource
 def get_client():
+    host = os.getenv("TYPESENSE_HOST", "localhost")
+    port = int(os.getenv("TYPESENSE_PORT", "8108"))
+    protocol = os.getenv("TYPESENSE_PROTOCOL", "http")
+    logger.info(f"Connecting to Typesense at {protocol}://{host}:{port}")
     return typesense.Client({
-        "nodes": [{
-            "host": os.getenv("TYPESENSE_HOST", "localhost"),
-            "port": int(os.getenv("TYPESENSE_PORT", "8108")),
-            "protocol": os.getenv("TYPESENSE_PROTOCOL", "http"),
-        }],
+        "nodes": [{"host": host, "port": port, "protocol": protocol}],
         "api_key": os.getenv("TYPESENSE_API_KEY", "mykey"),
         "connection_timeout_seconds": 5,
     })
 
 
 def list_collections(client):
+    logger.info("Fetching collections from Typesense...")
     cols = client.collections.retrieve()
+    logger.info(f"Found {len(cols)} collections")
     return [c["name"] for c in cols]
 
 
@@ -136,15 +152,19 @@ def search_campaigns(client, collection, query, limit=50):
     if not query:
         return [], "campaign"
     query_field = get_campaign_field_name(client, collection)
+    logger.info(f"Searching '{query}' in collection '{collection}' (field: {query_field}, limit: {limit})")
     res = client.collections[collection].documents.search({
         "q": query,
         "query_by": query_field,
         "per_page": limit,
     })
-    return [h["document"] for h in res.get("hits", [])], query_field
+    hits = res.get("hits", [])
+    logger.info(f"Found {len(hits)} results")
+    return [h["document"] for h in hits], query_field
 
 
 def detect_fields(client, collection: str):
+    logger.debug(f"Detecting fields for collection '{collection}'")
     schema = client.collections[collection].retrieve()
     field_names = [f["name"] for f in schema.get("fields", [])]
 
@@ -157,7 +177,7 @@ def detect_fields(client, collection: str):
                 return name
         return default
 
-    return {
+    fields = {
         "campaign": get_campaign_field_name(client, collection),
         "keyword": pick(["customer_search_term", "search_term", "keyword", "term", "targeting"]),
         "impressions": pick(["impressions", "impression"]),
@@ -165,9 +185,12 @@ def detect_fields(client, collection: str):
         "match_type": pick(["match_type", "matchtype"]),
         "targeting": pick(["targeting", "target"]),
     }
+    logger.debug(f"Detected fields: {fields}")
+    return fields
 
 
 def fetch_campaign_docs(client, collection: str, campaign: str, limit: int = 500):
+    logger.info(f"Fetching docs for campaign '{campaign}' from '{collection}'")
     fields = detect_fields(client, collection)
     campaign_field = fields["campaign"]
     if not campaign_field:
@@ -177,7 +200,9 @@ def fetch_campaign_docs(client, collection: str, campaign: str, limit: int = 500
         "query_by": campaign_field,
         "per_page": limit,
     })
-    return [h["document"] for h in res.get("hits", [])], fields
+    docs = [h["document"] for h in res.get("hits", [])]
+    logger.info(f"Fetched {len(docs)} documents")
+    return docs, fields
 
 
 def compute_ctr(df: pd.DataFrame, clicks_field: str, impressions_field: str):
@@ -212,7 +237,24 @@ def aggregate_keywords(df: pd.DataFrame, fields: dict):
 
 # ==================== MAIN APP ====================
 
+def init_session_state():
+    """Initialize session state variables for persisting results across tab switches."""
+    if "campaign_results" not in st.session_state:
+        st.session_state.campaign_results = None
+    if "keyword_results" not in st.session_state:
+        st.session_state.keyword_results = None
+    if "ai_recommendations" not in st.session_state:
+        st.session_state.ai_recommendations = None
+    if "ai_output_file" not in st.session_state:
+        st.session_state.ai_output_file = None
+
+
 def main():
+    logger.info("Rendering dashboard...")
+    
+    # Initialize session state
+    init_session_state()
+    
     # Header
     st.markdown("""
     <div class="main-header">
@@ -225,12 +267,15 @@ def main():
     try:
         client = get_client()
         collections = list_collections(client)
+        logger.info(f"Connected to Typesense. Collections: {collections}")
     except Exception as e:
+        logger.error(f"Failed to connect to Typesense: {e}")
         st.error(f"❌ Failed to connect to Typesense: {e}")
         st.info("Make sure Typesense is running and accessible.")
         return
 
     if not collections:
+        logger.warning("No collections found in Typesense")
         st.warning("⚠️ No collections found in Typesense. Run the ingestion script first.")
         st.code("python typesense_ingest.py --api-key mykey --drop-existing", language="bash")
         return
@@ -304,7 +349,16 @@ def main():
     with tab1:
         st.markdown('<div class="section-header">Campaign Search Results</div>', unsafe_allow_html=True)
         
+        # Clear button
+        col_clear1, col_clear2 = st.columns([4, 1])
+        with col_clear2:
+            if st.button("🗑️ Clear", key="clear_campaign", use_container_width=True):
+                st.session_state.campaign_results = None
+                st.rerun()
+        
+        # Search and store results
         if search_btn and campaign_name:
+            logger.info(f"Searching campaigns: {campaign_name}")
             results = []
             for col in selected_collections:
                 try:
@@ -312,7 +366,19 @@ def main():
                     results.append((col, field_used, docs))
                 except Exception as e:
                     results.append((col, "error", f"Error: {e}"))
+            
+            # Store in session state
+            st.session_state.campaign_results = {
+                "query": campaign_name,
+                "results": results,
+            }
 
+        # Display results from session state
+        if st.session_state.campaign_results:
+            results = st.session_state.campaign_results["results"]
+            query = st.session_state.campaign_results["query"]
+            st.caption(f"Results for: **{query}**")
+            
             if results:
                 sub_tabs = st.tabs([name.split("_")[-1] for name, _, _ in results])
                 for sub_tab, (col, field_used, docs) in zip(sub_tabs, results):
@@ -332,7 +398,7 @@ def main():
     with tab2:
         st.markdown('<div class="section-header">Keyword Performance Analysis</div>', unsafe_allow_html=True)
         
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns([3, 1, 1])
         with col1:
             keyword_campaign = st.text_input(
                 "Campaign for keyword analysis",
@@ -342,28 +408,30 @@ def main():
                 label_visibility="collapsed",
             )
         with col2:
-            keyword_btn = st.button("📊 Analyze Keywords", type="secondary", use_container_width=True)
+            keyword_btn = st.button("📊 Analyze", type="secondary", use_container_width=True)
+        with col3:
+            if st.button("🗑️ Clear", key="clear_keywords", use_container_width=True):
+                st.session_state.keyword_results = None
+                st.rerun()
 
+        # Analyze and store results
         if keyword_btn and keyword_campaign:
+            logger.info(f"Analyzing keywords for: {keyword_campaign}")
+            keyword_data = []
             for col_name in selected_collections:
-                with st.expander(f"📁 {col_name}", expanded=True):
-                    try:
-                        docs, fields = fetch_campaign_docs(client, col_name, keyword_campaign, limit=limit)
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-                        continue
-
+                try:
+                    docs, fields = fetch_campaign_docs(client, col_name, keyword_campaign, limit=limit)
                     keyword_field = fields["keyword"]
                     impressions_field = fields["impressions"]
                     clicks_field = fields["clicks"]
 
                     if not keyword_field or not impressions_field or not clicks_field:
-                        st.warning("Missing required fields (keyword, impressions, clicks).")
+                        keyword_data.append({"collection": col_name, "error": "Missing required fields"})
                         continue
 
                     df = pd.DataFrame(docs)
                     if df.empty:
-                        st.warning("No data found for this campaign.")
+                        keyword_data.append({"collection": col_name, "error": "No data found"})
                         continue
 
                     # Ensure numeric
@@ -376,7 +444,7 @@ def main():
                     df = df[df[impressions_field] >= min_impr]
 
                     if df.empty:
-                        st.warning(f"No keywords meet the impression threshold ({min_impr}).")
+                        keyword_data.append({"collection": col_name, "error": f"No keywords meet threshold ({min_impr})"})
                         continue
 
                     # Best keywords
@@ -402,29 +470,55 @@ def main():
                     if fields.get("targeting") and fields["targeting"] in df.columns:
                         display_cols.insert(1, fields["targeting"])
 
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.markdown("**✅ Top Performing Keywords**")
-                        st.dataframe(
-                            best[[c for c in display_cols if c in best.columns]],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                    with col_b:
-                        st.markdown("**⚠️ Underperforming Keywords**")
-                        st.dataframe(
-                            worst[[c for c in display_cols if c in worst.columns]],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
+                    keyword_data.append({
+                        "collection": col_name,
+                        "best": best,
+                        "worst": worst,
+                        "display_cols": display_cols,
+                    })
+                except Exception as e:
+                    keyword_data.append({"collection": col_name, "error": str(e)})
+            
+            # Store in session state
+            st.session_state.keyword_results = {
+                "campaign": keyword_campaign,
+                "data": keyword_data,
+            }
+
+        # Display results from session state
+        if st.session_state.keyword_results:
+            results = st.session_state.keyword_results
+            st.caption(f"Keyword analysis for: **{results['campaign']}**")
+            
+            for item in results["data"]:
+                with st.expander(f"📁 {item['collection']}", expanded=True):
+                    if "error" in item:
+                        st.warning(item["error"])
+                    else:
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.markdown("**✅ Top Performing Keywords**")
+                            display_cols = item["display_cols"]
+                            st.dataframe(
+                                item["best"][[c for c in display_cols if c in item["best"].columns]],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        with col_b:
+                            st.markdown("**⚠️ Underperforming Keywords**")
+                            st.dataframe(
+                                item["worst"][[c for c in display_cols if c in item["worst"].columns]],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
         else:
-            st.info("Enter a campaign name and click **Analyze Keywords** to see keyword performance.")
+            st.info("Enter a campaign name and click **Analyze** to see keyword performance.")
 
     # ==================== TAB 3: AI RECOMMENDATIONS ====================
     with tab3:
         st.markdown('<div class="section-header">AI-Powered Optimization Recommendations</div>', unsafe_allow_html=True)
         
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns([3, 1, 1])
         with col1:
             rec_campaign = st.text_input(
                 "Campaign for AI analysis",
@@ -434,14 +528,22 @@ def main():
                 label_visibility="collapsed",
             )
         with col2:
-            rec_btn = st.button("🤖 Generate Recommendations", type="primary", use_container_width=True)
+            rec_btn = st.button("🤖 Generate", type="primary", use_container_width=True)
+        with col3:
+            if st.button("🗑️ Clear", key="clear_ai", use_container_width=True):
+                st.session_state.ai_recommendations = None
+                st.session_state.ai_output_file = None
+                st.rerun()
 
+        # Generate and store results
         if rec_btn and rec_campaign:
             api_key = api_key_input or os.getenv("OPENAI_API_KEY")
             if not api_key:
                 st.error("❌ OpenAI API key is required. Add it in the sidebar.")
             else:
                 try:
+                    logger.info(f"Generating AI recommendations for: {rec_campaign}")
+                    
                     # Status indicator
                     status = st.status("Generating AI recommendations...", expanded=True)
                     
@@ -479,6 +581,13 @@ def main():
                         response_placeholder.markdown(full_text)
                     
                     status.update(label="✅ Recommendations generated!", state="complete")
+                    
+                    # Store in session state
+                    st.session_state.ai_recommendations = {
+                        "campaign": rec_campaign,
+                        "text": full_text,
+                    }
+                    st.session_state.ai_output_file = output_file
 
                     # Success info
                     if output_file:
@@ -492,8 +601,22 @@ def main():
                     st.error(f"❌ {e}")
                 except Exception as e:
                     st.error(f"❌ Failed to generate recommendations: {e}")
+        
+        # Display stored results if not generating new ones
+        elif st.session_state.ai_recommendations:
+            results = st.session_state.ai_recommendations
+            st.caption(f"Recommendations for: **{results['campaign']}**")
+            
+            if st.session_state.ai_output_file:
+                st.success(f"📁 Saved to: `{st.session_state.ai_output_file}`")
+            
+            st.markdown(results["text"])
+            
+            with st.expander("📋 Copy Recommendations", expanded=False):
+                st.code(results["text"], language="markdown")
+        
         else:
-            st.info("Enter a campaign name and click **Generate Recommendations** for AI-powered optimization insights.")
+            st.info("Enter a campaign name and click **Generate** for AI-powered optimization insights.")
             
             # Show what the AI can do
             st.markdown("""
