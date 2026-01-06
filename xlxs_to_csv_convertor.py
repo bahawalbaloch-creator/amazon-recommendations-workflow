@@ -111,7 +111,7 @@ class DataConverter:
 # Usage
 if __name__ == "__main__":
     # Step 1: Load data
-    loader = AmazonAdsDataLoader(data_directory='./amazon_reports')
+    loader = AmazonAdsDataLoader(data_directory='./data')
     reports = loader.load_all_reports()
     
     # Step 2: Convert and process

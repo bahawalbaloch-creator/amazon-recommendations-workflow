@@ -52,6 +52,21 @@ def build_schema(df: pd.DataFrame, collection_name: str) -> Dict:
     }
 
 
+def clean_currency_value(val):
+    """Strip currency symbols and convert to float."""
+    if pd.isna(val):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    cleaned = str(val).replace("$", "").replace(",", "").strip()
+    if cleaned == "" or cleaned.lower() == "nan":
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return val  # Return original if not a number
+
+
 def load_dataframe(file_path: Path) -> pd.DataFrame:
     """Load CSV or XLSX file into a cleaned dataframe."""
     if file_path.suffix.lower() == ".csv":
@@ -66,6 +81,12 @@ def load_dataframe(file_path: Path) -> pd.DataFrame:
 
     # Add stable id for Typesense
     df.insert(0, "id", [f"{file_path.stem}-{i}" for i in range(len(df))])
+
+    # Clean currency columns (columns with $ values like budget_amount, spend, sales)
+    currency_patterns = ["budget", "spend", "cost", "sales", "cpc", "price", "amount"]
+    for col in df.columns:
+        if any(pattern in col.lower() for pattern in currency_patterns):
+            df[col] = df[col].apply(clean_currency_value)
 
     # Let pandas try sensible dtypes for inference
     df = df.convert_dtypes()
@@ -98,6 +119,12 @@ def ensure_collection(client: typesense.Client, schema: Dict, drop_existing: boo
 
 def import_dataframe(client: typesense.Client, df: pd.DataFrame, collection_name: str):
     """Import a dataframe into Typesense in chunks."""
+    # Ensure all values are JSON-serializable (convert datetimes to ISO strings)
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].astype(str)
+
     records = df.to_dict(orient="records")
     for batch in chunk_records(records):
         client.collections[collection_name].documents.import_(batch, {"action": "upsert"})

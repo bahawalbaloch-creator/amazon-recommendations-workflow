@@ -173,7 +173,7 @@ class DataMerger:
 # Usage
 if __name__ == "__main__":
     # Steps 1-2: Load and process
-    loader = AmazonAdsDataLoader(data_directory='./amazon_reports')
+    loader = AmazonAdsDataLoader(data_directory='./data')
     reports = loader.load_all_reports()
     
     converter = DataConverter()

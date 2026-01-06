@@ -134,7 +134,7 @@ class AmazonAdsDataLoader:
 # Usage
 if __name__ == "__main__":
     # Initialize loader
-    loader = AmazonAdsDataLoader(data_directory='./amazon_reports')
+    loader = AmazonAdsDataLoader(data_directory='./data')
     
     # Load all reports
     reports = loader.load_all_reports()

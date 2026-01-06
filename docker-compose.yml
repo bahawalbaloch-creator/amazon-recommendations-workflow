@@ -8,8 +8,30 @@ services:
     ports:
       - "8108:8108"
     environment:
-      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY:-xyz}
+      TYPESENSE_API_KEY: mykey
       TYPESENSE_DATA_DIR: /data
     volumes:
       - ./typesense-data:/data
-    command: ["typesense-server", "--data-dir", "/data", "--api-key", "${TYPESENSE_API_KEY:-xyz}", "--listen-port", "8108"]
+    command: ["typesense-server", "--data-dir", "/data", "--api-key", "mykey", "--listen-port", "8108"]
+
+  streamlit:
+    image: python:3.11-slim
+    container_name: streamlit-dashboard
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_PROTOCOL: http
+      TYPESENSE_API_KEY: mykey
+    depends_on:
+      - typesense
+    ports:
+      - "8501:8501"
+    command: >
+      bash -c "pip install --no-cache-dir -r requirements.txt
+      && streamlit run typesense_campaign_dashboard.py
+         --server.address 0.0.0.0
+         --server.port 8501"
