@@ -5,3 +5,7 @@ output/
 typesense-data/
 .env
 .venv/
+*.csv
+*.pkl
+*.json
+*.xlsx
