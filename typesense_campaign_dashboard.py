@@ -158,17 +158,25 @@ def get_collection_schema(client, collection_name: str):
 def run_typesense_query(client, collection_name: str, query: str, query_by: str, 
                          filter_by: str = "", per_page: int = 20):
     """Run a search query against a collection."""
-    logger.info(f"Running query on '{collection_name}': q='{query}', query_by='{query_by}'")
+    # Clean inputs
+    query = query.strip() if query else "*"
+    filter_by = filter_by.strip() if filter_by else ""
+    
+    logger.info(f"Running query on '{collection_name}': q='{query}', query_by='{query_by}', filter='{filter_by}'")
+    
     search_params = {
         "q": query if query else "*",
         "query_by": query_by,
         "per_page": per_page,
     }
+    
+    # Only add filter if it's not empty and looks valid
     if filter_by:
         search_params["filter_by"] = filter_by
+        logger.info(f"Filter applied: {filter_by}")
     
     result = client.collections[collection_name].documents.search(search_params)
-    logger.info(f"Query returned {result.get('found', 0)} results")
+    logger.info(f"Query returned {result.get('found', 0)} results in {result.get('search_time_ms', 0)}ms")
     return result
 
 
@@ -266,12 +274,22 @@ def aggregate_keywords(df: pd.DataFrame, fields: dict):
         return df
 
     agg_map = {impressions_field: "sum", clicks_field: "sum"}
-    if match_field and match_field in df.columns:
+    
+    # Only add match_field if it's different from keyword_field and exists
+    if match_field and match_field in df.columns and match_field != keyword_field:
         agg_map[match_field] = lambda x: next((v for v in x if pd.notna(v)), None)
-    if targeting_field and targeting_field in df.columns:
-        agg_map[targeting_field] = lambda x: next((v for v in x if pd.notna(v)), None)
+    
+    # Only add targeting_field if it's different from keyword_field and match_field, and exists
+    if targeting_field and targeting_field in df.columns and targeting_field != keyword_field:
+        if targeting_field not in agg_map:  # Avoid duplicate columns
+            agg_map[targeting_field] = lambda x: next((v for v in x if pd.notna(v)), None)
 
-    return df.groupby(keyword_field, as_index=False).agg(agg_map).reset_index(drop=True)
+    result = df.groupby(keyword_field, as_index=False).agg(agg_map).reset_index(drop=True)
+    
+    # Ensure no duplicate columns (safety check)
+    result = result.loc[:, ~result.columns.duplicated()]
+    
+    return result
 
 
 # ==================== MAIN APP ====================
@@ -507,9 +525,14 @@ def main():
 
                     display_cols = [keyword_field, impressions_field, clicks_field, "ctr_calc"]
                     if fields.get("match_type") and fields["match_type"] in df.columns:
-                        display_cols.insert(1, fields["match_type"])
+                        if fields["match_type"] not in display_cols:
+                            display_cols.insert(1, fields["match_type"])
                     if fields.get("targeting") and fields["targeting"] in df.columns:
-                        display_cols.insert(1, fields["targeting"])
+                        if fields["targeting"] not in display_cols:
+                            display_cols.insert(1, fields["targeting"])
+                    
+                    # Ensure no duplicate columns
+                    display_cols = list(dict.fromkeys(display_cols))
 
                     keyword_data.append({
                         "collection": col_name,
@@ -539,19 +562,17 @@ def main():
                         col_a, col_b = st.columns(2)
                         with col_a:
                             st.markdown("**✅ Top Performing Keywords**")
-                            display_cols = item["display_cols"]
-                            st.dataframe(
-                                item["best"][[c for c in display_cols if c in item["best"].columns]],
-                                use_container_width=True,
-                                hide_index=True,
-                            )
+                            display_cols = list(dict.fromkeys(item["display_cols"]))  # Remove duplicates
+                            valid_cols = [c for c in display_cols if c in item["best"].columns]
+                            best_df = item["best"][valid_cols].copy()
+                            best_df = best_df.loc[:, ~best_df.columns.duplicated()]  # Safety
+                            st.dataframe(best_df, use_container_width=True, hide_index=True)
                         with col_b:
                             st.markdown("**⚠️ Underperforming Keywords**")
-                            st.dataframe(
-                                item["worst"][[c for c in display_cols if c in item["worst"].columns]],
-                                use_container_width=True,
-                                hide_index=True,
-                            )
+                            valid_cols = [c for c in display_cols if c in item["worst"].columns]
+                            worst_df = item["worst"][valid_cols].copy()
+                            worst_df = worst_df.loc[:, ~worst_df.columns.duplicated()]  # Safety
+                            st.dataframe(worst_df, use_container_width=True, hide_index=True)
         else:
             st.info("Enter a campaign name and click **Analyze** to see keyword performance.")
 
@@ -591,7 +612,7 @@ def main():
                     with status:
                         st.write("🔄 Fetching campaign data from Typesense...")
                         st.write("📊 Computing metrics...")
-                        st.write("🤖 Streaming GPT response...")
+                        st.write("🤖 Streaming Agent  response...")
                     
                     # Streaming response container
                     response_container = st.container()
@@ -785,8 +806,7 @@ def main():
             with col3:
                 filter_by = st.text_input(
                     "Filter (optional)",
-                    placeholder="e.g., impressions:>100",
-                    help="Typesense filter syntax: field:value, field:>value, field:[val1,val2]",
+                    placeholder="Leave empty for no filter",
                     key="explorer_filter",
                 )
             with col4:
@@ -797,6 +817,24 @@ def main():
                     value=20,
                     key="explorer_per_page",
                 )
+            
+            # Filter syntax help
+            with st.expander("💡 Filter Syntax Help", expanded=False):
+                st.markdown("""
+                **Numeric filters:**
+                - `impressions:>100` — greater than
+                - `clicks:>=10` — greater or equal
+                - `spend:<50` — less than
+                - `impressions:[100..500]` — range (inclusive)
+                
+                **String filters:**
+                - `campaign_name:=MyCampaign` — exact match
+                - `match_type:=EXACT` — exact match
+                
+                **Multiple filters:**
+                - `impressions:>100 && clicks:>0` — AND
+                - `match_type:=EXACT || match_type:=PHRASE` — OR
+                """)
             
             col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
             with col_btn1:
@@ -826,8 +864,16 @@ def main():
                         "query": query_text,
                         "result": result,
                     }
+                except typesense.exceptions.RequestMalformed as e:
+                    st.error(f"❌ Invalid filter syntax: {e}")
+                    st.info("💡 Check the **Filter Syntax Help** above for valid filter examples.")
                 except Exception as e:
-                    st.error(f"Query error: {e}")
+                    error_msg = str(e)
+                    if "filter" in error_msg.lower():
+                        st.error(f"❌ Filter error: {error_msg}")
+                        st.info("💡 Leave the filter field empty if you don't need filtering, or check the syntax help above.")
+                    else:
+                        st.error(f"❌ Query error: {error_msg}")
             
             # Export collection
             if export_btn:
