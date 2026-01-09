@@ -205,12 +205,15 @@ def build_prompt(data: Dict[str, Any]) -> str:
         "- Identify if campaign is budget-constrained (>90% spend) or under-utilizing (<70% spend)\n"
         "- Recommend specific budget adjustments with dollar amounts and rationale\n"
         "- Project impact on impression share and potential sales\n\n"
+        "- Do no exceed new budget more than 30% of the current budget"
         
         "## 2. BID STRATEGY\n"
         "- Analyze current avg CPC vs. category benchmarks\n"
         "- Calculate bid efficiency: (Conversions × AOV) / Cost\n"
         "- Recommend specific bid increases/decreases by keyword or ad group (e.g., 'increase bid by $0.15 for keyword X')\n"
         "- Identify keywords with high CVR but low impression share (bid too low)\n\n"
+        "- Do no exceed new bid more than 30% of the current bid"
+        "- Do not overestimate the impact of bid changes on sales impressions and conversions"
         
         "## 3. PLACEMENT OPTIMIZATION\n"
         "- Compare performance across Top of Search, Product Pages, and Rest of Search\n"
