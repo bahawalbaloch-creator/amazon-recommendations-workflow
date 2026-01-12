@@ -6,3 +6,4 @@ typesense
 streamlit
 scikit-learn
 numpy
+tiktoken
