@@ -26,6 +26,7 @@ import openai
 import pandas as pd
 import typesense
 from dotenv import load_dotenv
+from token_tracker import get_tracker, extract_token_usage, estimate_tokens
 
 # Load environment variables from .env file
 load_dotenv()
@@ -473,6 +474,19 @@ def generate_recommendations(
     )
     recommendations_text = response.choices[0].message.content
     logger.info(f"  - Response received: {len(recommendations_text)} chars")
+    
+    # Track token usage
+    token_usage = extract_token_usage(response)
+    if token_usage:
+        tracker = get_tracker()
+        tracker.record_usage(
+            input_tokens=token_usage["input_tokens"],
+            output_tokens=token_usage["output_tokens"],
+            total_tokens=token_usage["total_tokens"],
+            model=model,
+            campaign=campaign,
+            metadata={"function": "generate_recommendations", "streaming": False},
+        )
 
     logger.info("Step 9: Saving recommendations...")
     output_file = save_recommendations_to_file(campaign, recommendations_text)
@@ -635,14 +649,48 @@ def generate_recommendations_streaming(
     logger.info("Streaming response...")
     full_text = ""
     chunk_count = 0
+    token_usage = None
+    system_message = "You are a concise Amazon Ads optimization assistant."
+    
     for chunk in stream:
         if chunk.choices[0].delta.content:
             content = chunk.choices[0].delta.content
             full_text += content
             chunk_count += 1
             yield content
+        
+        # Check for token usage in chunk (usually in the last chunk)
+        if hasattr(chunk, "usage") and chunk.usage:
+            token_usage = extract_token_usage(chunk)
     
     logger.info(f"Stream complete: {chunk_count} chunks, {len(full_text)} chars")
+    
+    # Track token usage - estimate if not available from API
+    tracker = get_tracker()
+    if token_usage:
+        tracker.record_usage(
+            input_tokens=token_usage["input_tokens"],
+            output_tokens=token_usage["output_tokens"],
+            total_tokens=token_usage["total_tokens"],
+            model=model,
+            campaign=campaign,
+            metadata={"function": "generate_recommendations_streaming", "streaming": True},
+        )
+    else:
+        # Estimate tokens using tiktoken
+        input_tokens = estimate_tokens(system_message + "\n\n" + prompt, model)
+        output_tokens = estimate_tokens(full_text, model)
+        total_tokens = input_tokens + output_tokens
+        
+        logger.info(f"Estimated token usage: {input_tokens:,} input + {output_tokens:,} output = {total_tokens:,} total")
+        tracker.record_usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            model=model,
+            campaign=campaign,
+            metadata={"function": "generate_recommendations_streaming", "streaming": True, "estimated": True},
+        )
     
     # Save to file after streaming completes
     logger.info("Saving recommendations to file...")

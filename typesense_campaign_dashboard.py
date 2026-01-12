@@ -15,6 +15,7 @@ import streamlit as st
 import typesense
 from dotenv import load_dotenv
 from campaign_recommendations import generate_recommendations_streaming
+from token_tracker import get_tracker
 
 # Load environment variables from .env file
 load_dotenv()
@@ -373,6 +374,39 @@ def main():
         
         st.divider()
         
+        # Token Usage Display
+        st.markdown("**📊 Token Usage**")
+        try:
+            tracker = get_tracker()
+            totals = tracker.get_totals()
+            
+            col_token1, col_token2 = st.columns(2)
+            with col_token1:
+                st.metric("Input Tokens", f"{totals['input_tokens']:,}")
+            with col_token2:
+                st.metric("Output Tokens", f"{totals['output_tokens']:,}")
+            
+            st.metric("Total Tokens", f"{totals['total_tokens']:,}")
+            
+            # Show recent usage
+            recent = tracker.get_recent_usage(5)
+            if recent:
+                with st.expander("📝 Recent Usage", expanded=False):
+                    for entry in reversed(recent[-5:]):
+                        st.caption(
+                            f"**{entry.get('campaign', 'N/A')}** - "
+                            f"{entry['input_tokens']:,} in + {entry['output_tokens']:,} out = "
+                            f"{entry['total_tokens']:,} total ({entry.get('model', 'N/A')})"
+                        )
+            
+            if st.button("🔄 Reset Totals", help="Reset cumulative token totals"):
+                tracker.reset_totals()
+                st.rerun()
+        except Exception as e:
+            st.warning(f"Token tracking unavailable: {e}")
+        
+        st.divider()
+        
         # Analysis Parameters
         st.markdown("**Analysis Parameters**")
         top_n = st.slider("Top N keywords", 5, 100, 20, 5)
@@ -394,7 +428,7 @@ def main():
             label_visibility="collapsed",
         )
     with col2:
-        search_btn = st.button("🔍 Search", type="primary", use_container_width=True)
+        search_btn = st.button("🔍 Search", type="primary", width='stretch')
 
     if not selected_collections:
         st.info("👈 Select at least one collection from the sidebar to begin.")
@@ -411,7 +445,7 @@ def main():
         # Clear button
         col_clear1, col_clear2 = st.columns([4, 1])
         with col_clear2:
-            if st.button("🗑️ Clear", key="clear_campaign", use_container_width=True):
+            if st.button("🗑️ Clear", key="clear_campaign", width='stretch'):
                 st.session_state.campaign_results = None
                 st.rerun()
         
@@ -449,7 +483,7 @@ def main():
                         else:
                             st.caption(f"Collection: `{col}` | Query field: `{field_used}`")
                             st.metric("Rows Found", len(docs))
-                            st.dataframe(pd.DataFrame(docs), use_container_width=True)
+                            st.dataframe(pd.DataFrame(docs), width='stretch')
         else:
             st.info("Enter a campaign name and click **Search** to view campaign data.")
 
@@ -467,9 +501,9 @@ def main():
                 label_visibility="collapsed",
             )
         with col2:
-            keyword_btn = st.button("📊 Analyze", type="secondary", use_container_width=True)
+            keyword_btn = st.button("📊 Analyze", type="secondary", width='stretch')
         with col3:
-            if st.button("🗑️ Clear", key="clear_keywords", use_container_width=True):
+            if st.button("🗑️ Clear", key="clear_keywords", width='stretch'):
                 st.session_state.keyword_results = None
                 st.rerun()
 
@@ -566,13 +600,13 @@ def main():
                             valid_cols = [c for c in display_cols if c in item["best"].columns]
                             best_df = item["best"][valid_cols].copy()
                             best_df = best_df.loc[:, ~best_df.columns.duplicated()]  # Safety
-                            st.dataframe(best_df, use_container_width=True, hide_index=True)
+                            st.dataframe(best_df, width='stretch', hide_index=True)
                         with col_b:
                             st.markdown("**⚠️ Underperforming Keywords**")
                             valid_cols = [c for c in display_cols if c in item["worst"].columns]
                             worst_df = item["worst"][valid_cols].copy()
                             worst_df = worst_df.loc[:, ~worst_df.columns.duplicated()]  # Safety
-                            st.dataframe(worst_df, use_container_width=True, hide_index=True)
+                            st.dataframe(worst_df, width='stretch', hide_index=True)
         else:
             st.info("Enter a campaign name and click **Analyze** to see keyword performance.")
 
@@ -590,9 +624,9 @@ def main():
                 label_visibility="collapsed",
             )
         with col2:
-            rec_btn = st.button("🤖 Generate", type="primary", use_container_width=True)
+            rec_btn = st.button("🤖 Generate", type="primary", width='stretch')
         with col3:
-            if st.button("🗑️ Clear", key="clear_ai", use_container_width=True):
+            if st.button("🗑️ Clear", key="clear_ai", width='stretch'):
                 st.session_state.ai_recommendations = None
                 st.session_state.ai_output_file = None
                 st.rerun()
@@ -643,6 +677,20 @@ def main():
                         response_placeholder.markdown(full_text)
                     
                     status.update(label="✅ Recommendations generated!", state="complete")
+                    
+                    # Get token usage for this request
+                    try:
+                        tracker = get_tracker()
+                        recent_usage = tracker.get_recent_usage(1)
+                        if recent_usage:
+                            latest = recent_usage[0]
+                            st.info(
+                                f"📊 **Token Usage (This Request):** "
+                                f"{latest['input_tokens']:,} input + {latest['output_tokens']:,} output = "
+                                f"{latest['total_tokens']:,} total tokens"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not display token usage: {e}")
                     
                     # Store in session state
                     st.session_state.ai_recommendations = {
@@ -717,7 +765,7 @@ def main():
                 with st.expander("📋 Detailed Collection Stats", expanded=False):
                     stats_df = pd.DataFrame(stats)
                     stats_df.columns = ["Collection Name", "Documents", "Fields", "Created At"]
-                    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+                    st.dataframe(stats_df, width='stretch', hide_index=True)
             else:
                 st.warning("No collections found.")
         except Exception as e:
@@ -756,7 +804,7 @@ def main():
                             "Index": "✓" if f.get("index", True) else "✗",
                             "Optional": "✓" if f.get("optional") else "✗",
                         })
-                    st.dataframe(pd.DataFrame(fields_data), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(fields_data), width='stretch', hide_index=True)
                 
                 # Raw schema JSON
                 with st.expander("📄 Raw Schema JSON", expanded=False):
@@ -838,11 +886,11 @@ def main():
             
             col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
             with col_btn1:
-                run_query_btn = st.button("▶️ Run Query", type="primary", use_container_width=True)
+                run_query_btn = st.button("▶️ Run Query", type="primary", width='stretch')
             with col_btn2:
-                export_btn = st.button("📥 Export All", use_container_width=True, help="Export entire collection")
+                export_btn = st.button("📥 Export All", width='stretch', help="Export entire collection")
             with col_btn3:
-                if st.button("🗑️ Clear", key="clear_explorer", use_container_width=True):
+                if st.button("🗑️ Clear", key="clear_explorer", width='stretch'):
                     st.session_state.explorer_query_results = None
                     st.rerun()
             
@@ -918,7 +966,7 @@ def main():
                 if hits:
                     docs = [h["document"] for h in hits]
                     result_df = pd.DataFrame(docs)
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    st.dataframe(result_df, width='stretch', hide_index=True)
                     
                     # Raw JSON view
                     with st.expander("📄 Raw JSON Results", expanded=False):
