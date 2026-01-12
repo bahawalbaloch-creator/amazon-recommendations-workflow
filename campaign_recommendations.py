@@ -138,6 +138,7 @@ def ensure_numeric(df: pd.DataFrame, cols: list) -> pd.DataFrame:
 def compute_keyword_metrics(df: pd.DataFrame, min_impr: int, top_n: int):
     """Aggregate by search term and compute CTR/CPC/ACOS/ROAS, then pick best/worst by CTR."""
     keyword_col = find_keyword_column(df)
+    logger.info(f"Keyword column identified as: {keyword_col}")
 
     # Normalize metric columns (handles 7_day_total_sales -> sales, etc.)
     df = normalize_metrics(df)
