@@ -13,7 +13,7 @@ columns_to_extract = [
     "Portfolio Name (Informational only)",
     "Ad Group Default Bid (Informational only)",
     "Bid",
-    "Product Targeting Expression",
+    "Keyword Text",
     "Resolved Product Targeting Expression (Informational only)",
     "Impressions",
     "Clicks",
