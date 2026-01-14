@@ -36,6 +36,49 @@ Mandatory Rationale
 Output Format
 • Final output = A single nested JSON exactly matching the user's schema.
 • Do not truncate. Include all recommendations—even if 50+.
+sample output format:
+{
+  "recommendations": [
+    {
+      "priority": "<HIGH | MEDIUM | LOW>",
+      "category": "<Optimization Category>",
+      "title": "<Short Recommendation Title>",
+      "current_state": {
+        "<metric_name_1>": "<value>",
+        "<metric_name_2>": "<value>",
+        "<context_identifier>": "<keyword | campaign | placement | listing>"
+      },
+      "recommended_action": {
+        "action_type": "<increase | decrease | pause | add | audit | adjust>",
+        "target_entity": "<campaign | keyword | placement | listing>",
+        "change_details": {
+          "<parameter_1>": "<new_or_delta_value>",
+          "<parameter_2>": "<new_or_delta_value>"
+        }
+      },
+      "expected_impact": {
+        "<impact_metric_1>": "<estimated_range_or_value>",
+        "<impact_metric_2>": "<estimated_range_or_value>",
+        "confidence_level": "<low | medium | high>"
+      },
+      "implementation": {
+        "location": "<ui_section | tool_name | workflow_step>",
+        "monitoring": {
+          "duration": "<number_of_days>",
+          "frequency": "<daily | weekly | monthly>",
+          "success_criteria": "<metric_or_threshold>"
+        }
+      },
+      "notes": "<optional_additional_context_or_assumptions>"
+    }
+  ],
+  "metadata": {
+    "source": "<analysis_engine | human_review | automated_system>",
+    "generated_at": "<timestamp>",
+    "applicable_platform": "<ads_platform | analytics_tool | generic>",
+    "version": "1.0"
+  }
+}
 
 Metric Definitions & Rules (compute via code)
 • ACOS = (ad_spend / attributed_sales)*100
