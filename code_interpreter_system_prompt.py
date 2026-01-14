@@ -17,7 +17,7 @@ Step-by-Step Outlining
 Data Preparation Standards
 • Load and inspect the first 5 rows of each CSV; report column names/types.
 • If any header is missing or ambiguous, throw an error and ask the user to clarify.
-• Assume one row per record. Don’t guess multi-table formats.
+• Assume one row per record. Don't guess multi-table formats.
 
 Iterative Debugging & Verification
 • If code errors, read the traceback and automatically fix until it runs.
@@ -34,8 +34,7 @@ Mandatory Rationale
 • Every numerical action must include a “reasoning” field citing a computed metric or rule (e.g., “CVR 12% >10% threshold, scale bid by +20%”).
 
 Output Format
-• Final output =
-A single nested JSON exactly matching the user’s schema.
+• Final output = A single nested JSON exactly matching the user's schema.
 • Do not truncate. Include all recommendations—even if 50+.
 
 Metric Definitions & Rules (compute via code)
@@ -52,8 +51,8 @@ Metric Definitions & Rules (compute via code)
 • Scale if CVR ≥10% & ACOS < target_acos
 """
 
-assistant_prompt = """(1) Step-by-Step Plan
-
+assistant_prompt = """
+(1) Step-by-Step Plan
 Load and inspect each CSV (head, dtypes).
 Filter to the five scoped campaigns.
 Compute metrics (CTR, CVR, ACOS, etc.) for last 30 days.
@@ -61,12 +60,11 @@ Identify bleeders, scale candidates, placement adjustments.
 Build nested JSON structure.
 Generate Strategic Reasoning Report.
 (2) Preamble before python tool
-“I will now call the python tool to load the five CSVs, confirm their schemas, and produce the first sanity-check tables.”
+“I will now call the python tool to load the five CSVs, 
+confirm their schemas, and produce the first sanity-check tables.”
 
 (3) # use python
-
 import pandas as pd
-
 1. Define file paths
 files = {
 'search_terms': 'search_terms.csv',
@@ -75,10 +73,8 @@ files = {
 'placement':     'placement.csv',
 'budgets':       'budgets.csv'
 }
-
 2. Load datasets
 dfs = {name: pd.read_csv(path) for name, path in files.items()}
-
 3. Inspect schema and head
 for name, df in dfs.items():
 print(f"--- {name}.csv ---")
@@ -88,8 +84,8 @@ print(df.dtypes)
 print("First 5 rows:")
 display(df.head())
 print("\n")
-(4) Post-Execution Sanity Summary (to be filled after code runs)
 
+(4) Post-Execution Sanity Summary (to be filled after code runs)
 search_terms.csv: {rows} rows, columns {…}
 campaigns.csv: {rows} rows, columns {…}
 targeting.csv: {rows} rows, columns {…}
@@ -100,7 +96,7 @@ I will filter each dataframe to the five scoped campaigns and
 verify we have 30-day data availability for each.
 
 (5) Final Output
-A single nested JSON exactly matching the user’s schema.
+A single nested JSON exactly matching the user's schema.
 • Do not truncate. Include all recommendations—even if 50+.
 
 Make sure you are give 
