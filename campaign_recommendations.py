@@ -18,9 +18,9 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 import openai
 import pandas as pd
@@ -135,16 +135,40 @@ def ensure_numeric(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     return df
 
 
-def compute_keyword_metrics(df: pd.DataFrame, min_impr: int, top_n: int):
-    """Aggregate by search term and compute CTR/CPC/ACOS/ROAS, then pick best/worst by CTR."""
-    keyword_col = find_keyword_column(df)
-    logger.info(f"Keyword column identified as: {keyword_col}")
-
-    # Normalize metric columns (handles 7_day_total_sales -> sales, etc.)
-    df = normalize_metrics(df)
-
-    agg = (
-        df.groupby(keyword_col, as_index=False)
+def compute_keyword_metrics(
+    search_terms_df: pd.DataFrame,
+    targeting_df: pd.DataFrame = None,
+    min_impr: int = 50,
+    top_n: int = 10,
+):
+    """
+    Analyze both customer search terms and targeting keywords.
+    
+    Args:
+        search_terms_df: DataFrame with customer search terms (what customers searched)
+        targeting_df: DataFrame with targeting keywords (what we're bidding on)
+        min_impr: Minimum impressions threshold
+        top_n: Number of top/bottom keywords to return
+    
+    Returns:
+        Tuple of (keyword_rollup, best_keywords, worst_keywords, targeting_analysis, alignment_analysis)
+    """
+    logger.info("=" * 60)
+    logger.info("COMPUTING KEYWORD METRICS")
+    logger.info("=" * 60)
+    
+    # Normalize both dataframes
+    search_terms_df = normalize_metrics(search_terms_df.copy())
+    if targeting_df is not None and not targeting_df.empty:
+        targeting_df = normalize_metrics(targeting_df.copy())
+    
+    # ==================== CUSTOMER SEARCH TERMS ANALYSIS ====================
+    logger.info("Analyzing customer search terms (what customers actually searched)...")
+    search_term_col = find_keyword_column(search_terms_df)
+    logger.info(f"Customer search term column: {search_term_col}")
+    
+    customer_search_agg = (
+        search_terms_df.groupby(search_term_col, as_index=False)
         .agg(
             impressions=("impressions", "sum"),
             clicks=("clicks", "sum"),
@@ -152,15 +176,133 @@ def compute_keyword_metrics(df: pd.DataFrame, min_impr: int, top_n: int):
             sales=("sales", "sum"),
         )
     )
-
-    agg["ctr"] = (agg["clicks"] / agg["impressions"].replace(0, 1)) * 100
-    agg["cpc"] = agg["spend"] / agg["clicks"].replace(0, 1)
-    agg["acos"] = (agg["spend"] / agg["sales"].replace(0, 1)) * 100
-    agg["roas"] = agg["sales"] / agg["spend"].replace(0, 1)
-    agg = agg.replace([float("inf"), float("-inf")], 0)
-
-    filtered = agg[agg["impressions"] >= min_impr].copy()
-
+    
+    customer_search_agg["ctr"] = (customer_search_agg["clicks"] / customer_search_agg["impressions"].replace(0, 1)) * 100
+    customer_search_agg["cpc"] = customer_search_agg["spend"] / customer_search_agg["clicks"].replace(0, 1)
+    customer_search_agg["acos"] = (customer_search_agg["spend"] / customer_search_agg["sales"].replace(0, 1)) * 100
+    customer_search_agg["roas"] = customer_search_agg["sales"] / customer_search_agg["spend"].replace(0, 1)
+    customer_search_agg = customer_search_agg.replace([float("inf"), float("-inf")], 0)
+    customer_search_agg["type"] = "customer_search"
+    
+    customer_filtered = customer_search_agg[customer_search_agg["impressions"] >= min_impr].copy()
+    logger.info(f"  - Total customer search terms: {len(customer_search_agg)}")
+    logger.info(f"  - Customer search terms with {min_impr}+ impressions: {len(customer_filtered)}")
+    
+    # ==================== TARGETING KEYWORDS ANALYSIS ====================
+    targeting_agg = None
+    targeting_filtered = None
+    
+    if targeting_df is not None and not targeting_df.empty:
+        logger.info("Analyzing targeting keywords (what we're bidding on)...")
+        targeting_col = find_keyword_column(targeting_df)
+        logger.info(f"Targeting keyword column: {targeting_col}")
+        
+        targeting_agg = (
+            targeting_df.groupby(targeting_col, as_index=False)
+            .agg(
+                impressions=("impressions", "sum"),
+                clicks=("clicks", "sum"),
+                spend=("spend", "sum"),
+                sales=("sales", "sum"),
+            )
+        )
+        
+        targeting_agg["ctr"] = (targeting_agg["clicks"] / targeting_agg["impressions"].replace(0, 1)) * 100
+        targeting_agg["cpc"] = targeting_agg["spend"] / targeting_agg["clicks"].replace(0, 1)
+        targeting_agg["acos"] = (targeting_agg["spend"] / targeting_agg["sales"].replace(0, 1)) * 100
+        targeting_agg["roas"] = targeting_agg["sales"] / targeting_agg["spend"].replace(0, 1)
+        targeting_agg = targeting_agg.replace([float("inf"), float("-inf")], 0)
+        targeting_agg["type"] = "targeting"
+        
+        targeting_filtered = targeting_agg[targeting_agg["impressions"] >= min_impr].copy()
+        logger.info(f"  - Total targeting keywords: {len(targeting_agg)}")
+        logger.info(f"  - Targeting keywords with {min_impr}+ impressions: {len(targeting_filtered)}")
+    else:
+        logger.warning("  - No targeting data available")
+    
+    # ==================== ALIGNMENT ANALYSIS ====================
+    alignment_analysis = {
+        "well_aligned": [],
+        "poorly_aligned": [],
+        "untargeted_searches": [],
+        "unused_targeting": [],
+    }
+    
+    if targeting_agg is not None and not targeting_agg.empty:
+        logger.info("Analyzing alignment between targeting and customer searches...")
+        
+        # Normalize keyword names for comparison (lowercase, strip whitespace)
+        customer_terms = set(customer_search_agg[search_term_col].str.lower().str.strip())
+        targeting_terms = set(targeting_agg[targeting_col].str.lower().str.strip())
+        
+        # Find well-aligned: targeting keywords that match customer searches
+        well_aligned_terms = customer_terms.intersection(targeting_terms)
+        logger.info(f"  - Well-aligned keywords (targeted + searched): {len(well_aligned_terms)}")
+        
+        # Find untargeted searches: popular customer searches not being targeted
+        untargeted_searches = customer_terms - targeting_terms
+        untargeted_df = customer_search_agg[
+            customer_search_agg[search_term_col].str.lower().str.strip().isin(untargeted_searches)
+        ].copy()
+        untargeted_df = untargeted_df[untargeted_df["impressions"] >= min_impr].copy()
+        untargeted_df = untargeted_df.sort_values(["impressions", "sales"], ascending=[False, False]).head(top_n)
+        alignment_analysis["untargeted_searches"] = untargeted_df.to_dict("records")
+        logger.info(f"  - Untargeted customer searches (opportunities): {len(untargeted_df)}")
+        
+        # Find unused targeting: targeting keywords that don't match customer searches
+        unused_targeting = targeting_terms - customer_terms
+        unused_df = targeting_agg[
+            targeting_agg[targeting_col].str.lower().str.strip().isin(unused_targeting)
+        ].copy()
+        unused_df = unused_df[unused_df["impressions"] >= min_impr].copy()
+        unused_df = unused_df.sort_values(["spend", "acos"], ascending=[False, True]).head(top_n)
+        alignment_analysis["unused_targeting"] = unused_df.to_dict("records")
+        logger.info(f"  - Unused targeting keywords (not matching searches): {len(unused_df)}")
+        
+        # Well-aligned: targeting keywords that match customer searches and perform well
+        well_aligned_df = targeting_agg[
+            targeting_agg[targeting_col].str.lower().str.strip().isin(well_aligned_terms)
+        ].copy()
+        well_aligned_df = well_aligned_df[well_aligned_df["impressions"] >= min_impr].copy()
+        well_aligned_df = well_aligned_df.sort_values(["roas", "sales"], ascending=[False, False]).head(top_n)
+        alignment_analysis["well_aligned"] = well_aligned_df.to_dict("records")
+        
+        # Poorly-aligned: targeting keywords that match searches but perform poorly (high ACOS, low ROAS)
+        poorly_aligned_df = targeting_agg[
+            targeting_agg[targeting_col].str.lower().str.strip().isin(well_aligned_terms)
+        ].copy()
+        poorly_aligned_df = poorly_aligned_df[poorly_aligned_df["impressions"] >= min_impr].copy()
+        # Filter for poor performance: ACOS > 30% or ROAS < 1.0
+        poorly_aligned_df = poorly_aligned_df[
+            (poorly_aligned_df["acos"] > 30) | (poorly_aligned_df["roas"] < 1.0)
+        ].copy()
+        poorly_aligned_df = poorly_aligned_df.sort_values(["acos", "spend"], ascending=[False, False]).head(top_n)
+        alignment_analysis["poorly_aligned"] = poorly_aligned_df.to_dict("records")
+        logger.info(f"  - Poorly-aligned targeting (high ACOS/low ROAS): {len(poorly_aligned_df)}")
+    
+    # ==================== COMBINED KEYWORD ROLLUP ====================
+    # Combine both types for overall rollup
+    keyword_rollup = customer_search_agg.copy()
+    if targeting_agg is not None and not targeting_agg.empty:
+        # Rename columns to match
+        targeting_rollup = targeting_agg.copy()
+        targeting_rollup = targeting_rollup.rename(columns={targeting_col: search_term_col})
+        keyword_rollup = pd.concat([keyword_rollup, targeting_rollup], ignore_index=True)
+        # Aggregate duplicates (if same keyword appears in both)
+        keyword_rollup = keyword_rollup.groupby(search_term_col, as_index=False).agg({
+            "impressions": "sum",
+            "clicks": "sum",
+            "spend": "sum",
+            "sales": "sum",
+            "ctr": "mean",  # Average CTR
+            "cpc": "mean",
+            "acos": "mean",
+            "roas": "mean",
+        })
+    
+    # ==================== BEST/WORST KEYWORDS ====================
+    filtered = keyword_rollup[keyword_rollup["impressions"] >= min_impr].copy()
+    
     best = (
         filtered.sort_values(["ctr", "impressions"], ascending=[False, False])
         .head(top_n)
@@ -171,14 +313,129 @@ def compute_keyword_metrics(df: pd.DataFrame, min_impr: int, top_n: int):
         .head(top_n)
         .to_dict("records")
     )
-
-    return agg.to_dict("records"), best, worst
+    
+    logger.info("=" * 60)
+    logger.info("KEYWORD METRICS COMPLETE")
+    logger.info("=" * 60)
+    
+    return (
+        keyword_rollup.to_dict("records"),
+        best,
+        worst,
+        {
+            "targeting_keywords": targeting_agg.to_dict("records") if targeting_agg is not None else [],
+            "customer_search_terms": customer_search_agg.to_dict("records"),
+        },
+        alignment_analysis,
+    )
 
 
 def build_prompt(data: Dict[str, Any]) -> str:
     """Build a detailed, quantitative prompt for GPT with precomputed metrics."""
+    # return (
+    #     "You are an Amazon Sponsored Products optimization expert with deep expertise in PPC analytics.\n\n"
+    
+    #     "# YOUR TASK\n"
+    #     "Analyze the campaign data below and provide 8-12 specific, quantitative recommendations.\n"
+    #     "Each recommendation must include:\n"
+    #     "- Exact numbers (current vs. target metrics)\n"
+    #     "- Expected impact (e.g., 'reduce wasted spend by $X' or 'increase CTR from X% to Y%')\n"
+    #     "- Specific action steps with thresholds\n"
+    #     "- Priority level (High/Medium/Low) based on potential ROI impact\n\n"
+      
+    #     "# CAMPAIGN DATA\n"
+    #     f"Campaign Summary:\n{json.dumps(data['campaign_summary'], indent=2, ensure_ascii=False)}\n\n"
+       
+    #     f"Budget Metrics:\n{json.dumps(data['budget'], indent=2, ensure_ascii=False)}\n\n"
+    
+    #     f"Top Performing Keywords (High CTR):\n{json.dumps(data['best_keywords'], indent=2, ensure_ascii=False)}\n\n"
+      
+    #     f"Underperforming Keywords (Low CTR):\n{json.dumps(data['worst_keywords'], indent=2, ensure_ascii=False)}\n\n"
+        
+    #     f"Complete Keyword Performance Rollup:\n{json.dumps(data['keyword_rollup'], indent=2, ensure_ascii=False)[:5000]}\n\n"
+    # )
+    
+    # Add keyword type analysis if available
+    prompt_additions = ""
+    if 'keyword_types' in data and data['keyword_types']:
+        prompt_additions += (
+            f"\n# UNDERSTANDING KEYWORD TYPES - CRITICAL CONCEPT\n"
+            f"Amazon Ads has TWO distinct types of keywords that you MUST understand:\n\n"
+            f"1. **TARGETING KEYWORDS** (Set in Campaign Manager):\n"
+            f"   - These are keywords YOU actively bid on and set in your campaign manager\n"
+            f"   - They represent your targeting strategy - what you WANT to show ads for\n"
+            f"   - Example: If you set 'wireless headphones' as a targeting keyword, you're telling Amazon to show your ad when that keyword is relevant\n"
+            f"   - Performance metrics show how well your chosen targeting keywords are performing\n\n"
+            f"2. **CUSTOMER SEARCH TERMS** (What Customers Actually Searched):\n"
+            f"   - These are the actual search queries customers typed into Amazon\n"
+            f"   - They represent REAL customer behavior - what customers are ACTUALLY searching for\n"
+            f"   - Example: A customer might search 'best bluetooth earbuds' and your ad appeared (even if you targeted 'wireless headphones')\n"
+            f"   - This shows the gap between what you're targeting vs. what customers want\n\n"
+            f"**WHY THIS MATTERS:**\n"
+            f"- If customers search for terms you're NOT targeting, you're missing opportunities\n"
+            f"- If you're targeting keywords customers DON'T search for, you're wasting budget\n"
+            f"- The goal is to align your targeting keywords with actual customer search behavior\n\n"
+            f"Targeting Keywords Data (what we're bidding on):\n"
+            f"{json.dumps(data['keyword_types'].get('targeting_keywords', [])[:20], indent=2, ensure_ascii=False)}\n\n"
+            f"Customer Search Terms Data (what customers actually searched):\n"
+            f"{json.dumps(data['keyword_types'].get('customer_search_terms', [])[:20], indent=2, ensure_ascii=False)}\n\n"
+        )
+    
+    # Add alignment analysis if available
+    if 'alignment_analysis' in data and data['alignment_analysis']:
+        alignment = data['alignment_analysis']
+        prompt_additions += (
+            f"\n# TARGETING ALIGNMENT ANALYSIS\n"
+            f"This analysis compares your TARGETING KEYWORDS (what you set in campaign manager) vs CUSTOMER SEARCH TERMS (what customers actually searched).\n"
+            f"This reveals whether your targeting strategy aligns with real customer behavior.\n\n"
+        )
+        
+        if alignment.get('well_aligned'):
+            prompt_additions += (
+                f"✅ Well-Aligned Targeting Keywords (matching customer searches, performing well):\n"
+                f"{json.dumps(alignment['well_aligned'], indent=2, ensure_ascii=False)}\n\n"
+            )
+        
+        if alignment.get('poorly_aligned'):
+            prompt_additions += (
+                f"⚠️ Poorly-Aligned Targeting Keywords (matching searches but high ACOS/low ROAS):\n"
+                f"{json.dumps(alignment['poorly_aligned'], indent=2, ensure_ascii=False)}\n\n"
+            )
+        
+        if alignment.get('untargeted_searches'):
+            prompt_additions += (
+                f"🎯 Untargeted Customer Searches (popular searches we're NOT bidding on - OPPORTUNITIES):\n"
+                f"{json.dumps(alignment['untargeted_searches'], indent=2, ensure_ascii=False)}\n\n"
+                f"**These are high-priority keywords to add to targeting - customers are searching for them but we're missing out.**\n\n"
+            )
+        
+        if alignment.get('unused_targeting'):
+            prompt_additions += (
+                f"❌ Unused Targeting Keywords (we're bidding on these but customers aren't searching for them):\n"
+                f"{json.dumps(alignment['unused_targeting'], indent=2, ensure_ascii=False)}\n\n"
+                f"**Consider pausing or reducing bids on these - they don't align with customer search behavior.**\n\n"
+            )
+    
     return (
         "You are an Amazon Sponsored Products optimization expert with deep expertise in PPC analytics.\n\n"
+        
+        "# CRITICAL CONCEPT: TWO TYPES OF KEYWORDS\n"
+        "Amazon Ads tracks TWO distinct keyword types that you MUST understand:\n\n"
+        "1. **TARGETING KEYWORDS** (Set in Campaign Manager):\n"
+        "   - Keywords YOU actively set and bid on in your campaign manager\n"
+        "   - Represent your targeting STRATEGY - what you want to show ads for\n"
+        "   - These are under YOUR CONTROL - you decide which ones to add, pause, or adjust bids\n"
+        "   - Example: You set 'wireless headphones' as a targeting keyword with a $1.50 bid\n\n"
+        "2. **CUSTOMER SEARCH TERMS** (What Customers Actually Searched):\n"
+        "   - The actual search queries customers typed into Amazon's search box\n"
+        "   - Represent REAL customer BEHAVIOR - what customers are actually looking for\n"
+        "   - These are NOT under your control - they show what customers want\n"
+        "   - Example: A customer searches 'best bluetooth earbuds' and your ad appeared\n"
+        "   - Your ad appeared because Amazon matched it to your targeting keywords (e.g., 'wireless headphones')\n\n"
+        "**THE KEY INSIGHT:**\n"
+        "- If customers search for terms you're NOT targeting → You're missing opportunities (add these as targeting keywords)\n"
+        "- If you're targeting keywords customers DON'T search for → You're wasting budget (pause or reduce bids)\n"
+        "- The goal: Align your TARGETING KEYWORDS with actual CUSTOMER SEARCH TERMS\n\n"
         
         "# YOUR TASK\n"
         "Analyze the campaign data below and provide 8-12 specific, quantitative recommendations.\n"
@@ -186,9 +443,17 @@ def build_prompt(data: Dict[str, Any]) -> str:
         "- Exact numbers (current vs. target metrics)\n"
         "- Expected impact (e.g., 'reduce wasted spend by $X' or 'increase CTR from X% to Y%')\n"
         "- Specific action steps with thresholds\n"
-        "- Priority level (High/Medium/Low) based on potential ROI impact\n\n"
+        "- Priority level (High/Medium/Low) based on potential ROI impact\n"
+        "- **SPECIAL FOCUS**: Use the alignment analysis to recommend adding untargeted customer searches and pausing unused targeting keywords\n\n"
         
         "# CAMPAIGN DATA\n"
+        "**CRITICAL: METRIC INTERPRETATION**\n"
+        "- Metrics in 'Campaign Summary' (spend, sales, clicks, impressions) are **DAILY AVERAGES**, not totals\n"
+        "- These are calculated by dividing total metrics by the number of days in the date range\n"
+        "- The date range (date_range_start, date_range_end) and number of days (num_days) are included in the summary\n"
+        "- Total values over the entire period are also provided (spend_total, sales_total, clicks_total, impressions_total)\n"
+        "- **Always use daily averages** when making recommendations (e.g., 'daily spend of $X', 'daily impressions of Y')\n"
+        "- When projecting monthly impact, multiply daily averages by 30, not by the actual number of days in the report\n\n"
         f"Campaign Summary:\n{json.dumps(data['campaign_summary'], indent=2, ensure_ascii=False)}\n\n"
         
         f"Budget Metrics:\n{json.dumps(data['budget'], indent=2, ensure_ascii=False)}\n\n"
@@ -198,6 +463,8 @@ def build_prompt(data: Dict[str, Any]) -> str:
         f"Underperforming Keywords (Low CTR):\n{json.dumps(data['worst_keywords'], indent=2, ensure_ascii=False)}\n\n"
         
         f"Complete Keyword Performance Rollup:\n{json.dumps(data['keyword_rollup'], indent=2, ensure_ascii=False)[:5000]}\n\n"
+        
+        f"{prompt_additions}"
         
         "# ANALYSIS FRAMEWORK\n"
         "Structure your recommendations across these categories:\n\n"
@@ -223,11 +490,25 @@ def build_prompt(data: Dict[str, Any]) -> str:
         "- Recommend bid multiplier adjustments (e.g., 'increase Top of Search multiplier from X% to Y%')\n"
         "- Quantify expected cost and revenue impact\n\n"
         
-        "## 4. KEYWORD EXPANSION\n"
-        "- Identify top 3-5 keywords to scale (high CTR, high CVR, ACOS below target)\n"
-        "- Recommend specific actions: increase bids by $X, allocate $Y additional daily budget\n"
-        "- Suggest match type optimization (e.g., 'add exact match variant for keyword X')\n"
-        "- Project incremental sales potential\n\n"
+        "## 4. KEYWORD EXPANSION & TARGETING ALIGNMENT\n"
+        "**UNDERSTAND THE TWO KEYWORD TYPES:**\n"
+        "- **Targeting Keywords**: Keywords YOU set in campaign manager (your strategy)\n"
+        "- **Customer Search Terms**: What customers ACTUALLY searched (real behavior)\n\n"
+        "**KEY INSIGHTS TO PROVIDE:**\n"
+        "- **CRITICAL PRIORITY**: 'Untargeted Customer Searches' - customers are searching for these but you're NOT targeting them\n"
+        "  → These are HIGH-VALUE OPPORTUNITIES - add them as exact-match targeting keywords immediately\n"
+        "  → Calculate potential revenue: If you add keyword X (with Y impressions, Z% CTR, $W sales), project incremental sales\n"
+        "- **COST SAVINGS**: 'Unused Targeting Keywords' - you're bidding on these but customers DON'T search for them\n"
+        "  → These are WASTING BUDGET - recommend pausing or reducing bids by X%\n"
+        "  → Calculate wasted spend: If keyword X has $Y spend but 0 customer searches, that's $Y wasted per period\n"
+        "- **PERFORMANCE OPTIMIZATION**: 'Well-Aligned' vs 'Poorly-Aligned' targeting keywords\n"
+        "  → Well-aligned: Keep and potentially increase bids (they match customer behavior AND perform well)\n"
+        "  → Poorly-aligned: These match customer searches but have high ACOS - recommend bid reductions or negative keywords\n"
+        "- **ACTIONABLE RECOMMENDATIONS:**\n"
+        "  → List specific untargeted customer searches to ADD (with suggested bids, match types, ad groups)\n"
+        "  → List specific unused targeting keywords to PAUSE (with estimated monthly savings)\n"
+        "  → Recommend bid adjustments for poorly-aligned keywords (reduce by $X or Y%)\n"
+        "  → Project impact: 'Adding these 5 untargeted searches could capture $X additional monthly sales'\n\n"
         
         "## 5. NEGATIVE KEYWORD STRATEGY\n"
         "- List specific keywords to pause (e.g., 'CTR < 0.3%, spend > $50, 0 conversions')\n"
@@ -272,7 +553,7 @@ def main():
     parser.add_argument("--typesense-protocol", default=os.getenv("TYPESENSE_PROTOCOL", "http"))
     parser.add_argument("--typesense-api-key", default=os.getenv("TYPESENSE_API_KEY"))
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY"), help="OpenAI API key.")
-    parser.add_argument("--model", default="gpt-4o-mini", help="OpenAI chat model.")
+    parser.add_argument("--model", default="gpt-5-mini", help="OpenAI chat model.")
     parser.add_argument("--top-n", type=int, default=10, help="Top N best/worst keywords to include.")
     parser.add_argument("--min-impr", type=int, default=50, help="Minimum impressions to consider a keyword.")
     args = parser.parse_args()
@@ -328,6 +609,70 @@ def find_campaign_column(df: pd.DataFrame) -> str:
     raise KeyError("No campaign column found in dataframe")
 
 
+def find_date_column(df: pd.DataFrame) -> Optional[str]:
+    """Find the date column name in the dataframe."""
+    # Common date column names
+    candidates = [
+        "date", "start_date", "end_date", "reporting_date", "date_range_start",
+        "date_range_end", "start_time", "end_time", "day", "report_date"
+    ]
+    
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+    
+    # Fuzzy match: look for columns with "date" in the name
+    for col in df.columns:
+        if "date" in col.lower() or "time" in col.lower():
+            return col
+    
+    return None
+
+
+def calculate_date_range(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], int]:
+    """
+    Calculate the date range from a dataframe.
+    
+    Returns:
+        Tuple of (start_date, end_date, num_days)
+        Returns (None, None, 1) if no date column found
+    """
+    date_col = find_date_column(df)
+    
+    if date_col is None or date_col not in df.columns:
+        logger.warning("No date column found in dataframe, assuming 1 day period")
+        return None, None, 1
+    
+    try:
+        # Try to parse dates
+        dates = pd.to_datetime(df[date_col], errors='coerce')
+        dates = dates.dropna()
+        
+        if len(dates) == 0:
+            logger.warning(f"Date column '{date_col}' found but no valid dates, assuming 1 day period")
+            return None, None, 1
+        
+        start_date = dates.min()
+        end_date = dates.max()
+        
+        # Calculate number of days (inclusive)
+        num_days = (end_date - start_date).days + 1
+        
+        if num_days < 1:
+            num_days = 1
+        
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
+        
+        logger.info(f"Date range detected: {start_str} to {end_str} ({num_days} days)")
+        
+        return start_str, end_str, num_days
+        
+    except Exception as e:
+        logger.warning(f"Error parsing dates from column '{date_col}': {e}, assuming 1 day period")
+        return None, None, 1
+
+
 def generate_recommendations(
     campaign: str,
     ts_host: str,
@@ -335,7 +680,7 @@ def generate_recommendations(
     ts_protocol: str,
     ts_api_key: str,
     api_key: str,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5-mini",
     top_n: int = 10,
     min_impr: int = 50,
 ) -> str:
@@ -402,7 +747,15 @@ def generate_recommendations(
     # Normalize metric columns (handles 7_day_total_sales -> sales, etc.)
     campaigns_df = normalize_metrics(campaigns_df)
 
-    logger.info("Step 4: Computing campaign metrics...")
+    logger.info("Step 4: Calculating date range...")
+    # Try to find date range from campaigns_df, fallback to search_terms
+    start_date, end_date, num_days = calculate_date_range(campaigns_df)
+    if start_date is None:
+        start_date, end_date, num_days = calculate_date_range(search_terms)
+    
+    logger.info(f"  - Date range: {start_date or 'Unknown'} to {end_date or 'Unknown'} ({num_days} days)")
+
+    logger.info("Step 5: Computing campaign metrics...")
     campaign_summary = campaigns_df.groupby(camp_camp_col, as_index=False).agg(
         spend=("spend", "sum"),
         sales=("sales", "sum"),
@@ -411,6 +764,23 @@ def generate_recommendations(
     )
     if "budget_amount" in campaigns_df.columns:
         campaign_summary["budget_amount"] = campaigns_df["budget_amount"].fillna(0).iloc[0] if len(campaigns_df) > 0 else 0
+    
+    # Convert totals to daily averages
+    campaign_summary["spend_total"] = campaign_summary["spend"]
+    campaign_summary["sales_total"] = campaign_summary["sales"]
+    campaign_summary["clicks_total"] = campaign_summary["clicks"]
+    campaign_summary["impressions_total"] = campaign_summary["impressions"]
+    
+    campaign_summary["spend"] = campaign_summary["spend"] / num_days
+    campaign_summary["sales"] = campaign_summary["sales"] / num_days
+    campaign_summary["clicks"] = campaign_summary["clicks"] / num_days
+    campaign_summary["impressions"] = campaign_summary["impressions"] / num_days
+    
+    # Add date range info
+    campaign_summary["date_range_start"] = start_date or "Unknown"
+    campaign_summary["date_range_end"] = end_date or "Unknown"
+    campaign_summary["num_days"] = num_days
+    
     campaign_summary["ctr"] = (campaign_summary["clicks"] / campaign_summary["impressions"].replace(0, 1)) * 100
     campaign_summary["cvr"] = campaign_summary["sales"] / campaign_summary["clicks"].replace(0, 1)
     campaign_summary["acos"] = (campaign_summary["spend"] / campaign_summary["sales"].replace(0, 1)) * 100
@@ -418,12 +788,16 @@ def generate_recommendations(
     campaign_summary = campaign_summary.replace([float("inf"), float("-inf")], 0)
     
     summary = campaign_summary.iloc[0] if len(campaign_summary) > 0 else {}
-    logger.info(f"  - Spend: ${summary.get('spend', 0):.2f}")
-    logger.info(f"  - Sales: ${summary.get('sales', 0):.2f}")
+    logger.info(f"  - Total Spend: ${summary.get('spend_total', 0):.2f} over {num_days} days")
+    logger.info(f"  - Daily Spend: ${summary.get('spend', 0):.2f}")
+    logger.info(f"  - Total Sales: ${summary.get('sales_total', 0):.2f} over {num_days} days")
+    logger.info(f"  - Daily Sales: ${summary.get('sales', 0):.2f}")
+    logger.info(f"  - Total Impressions: {summary.get('impressions_total', 0):,.0f} over {num_days} days")
+    logger.info(f"  - Daily Impressions: {summary.get('impressions', 0):,.0f}")
     logger.info(f"  - ACOS: {summary.get('acos', 0):.2f}%")
     logger.info(f"  - ROAS: {summary.get('roas', 0):.2f}x")
 
-    logger.info("Step 5: Processing budget data...")
+    logger.info("Step 6: Processing budget data...")
     budget_info = {}
     if budgets is not None and not budgets.empty:
         budgets = normalize_metrics(budgets)
@@ -444,26 +818,41 @@ def generate_recommendations(
         budget_info = {"total_budget": budget_amt, "daily_budget": budget_amt}
         logger.info(f"  - Budget from campaign: ${budget_amt:.2f}")
 
-    logger.info("Step 6: Analyzing keywords...")
-    keyword_rollup, best_keywords, worst_keywords = compute_keyword_metrics(
-        search_terms, min_impr=min_impr, top_n=top_n
+    logger.info("Step 7: Analyzing keywords...")
+    targeting_data = reports.get("targeting", pd.DataFrame())
+    if targeting_data is not None and not targeting_data.empty:
+        targeting_camp_col = find_campaign_column(targeting_data)
+        targeting_data = targeting_data[targeting_data[targeting_camp_col].str.lower() == campaign_name]
+        logger.info(f"  - Targeting rows: {len(targeting_data)}")
+    else:
+        targeting_data = pd.DataFrame()
+    
+    keyword_rollup, best_keywords, worst_keywords, keyword_types, alignment_analysis = compute_keyword_metrics(
+        search_terms_df=search_terms,
+        targeting_df=targeting_data,
+        min_impr=min_impr,
+        top_n=top_n,
     )
     logger.info(f"  - Total keywords: {len(keyword_rollup)}")
     logger.info(f"  - Best keywords: {len(best_keywords)}")
     logger.info(f"  - Worst keywords: {len(worst_keywords)}")
+    logger.info(f"  - Well-aligned targeting: {len(alignment_analysis.get('well_aligned', []))}")
+    logger.info(f"  - Untargeted customer searches: {len(alignment_analysis.get('untargeted_searches', []))}")
 
-    logger.info("Step 7: Building GPT prompt...")
+    logger.info("Step 8: Building GPT prompt...")
     payload = {
         "campaign_summary": campaign_summary.to_dict("records"),
         "budget": budget_info,
         "keyword_rollup": keyword_rollup,
         "best_keywords": best_keywords,
         "worst_keywords": worst_keywords,
+        "keyword_types": keyword_types,
+        "alignment_analysis": alignment_analysis,
     }
     prompt = build_prompt(payload)
     logger.info(f"  - Prompt length: {len(prompt)} chars")
 
-    logger.info(f"Step 8: Calling OpenAI API (model: {model})...")
+    logger.info(f"Step 9: Calling OpenAI API (model: {model})...")
     openai_client = openai.OpenAI(api_key=api_key)
     response = openai_client.chat.completions.create(
         model=model,
@@ -489,7 +878,7 @@ def generate_recommendations(
             metadata={"function": "generate_recommendations", "streaming": False},
         )
 
-    logger.info("Step 9: Saving recommendations...")
+    logger.info("Step 10: Saving recommendations...")
     output_file = save_recommendations_to_file(campaign, recommendations_text)
     logger.info(f"  - Saved to: {output_file}")
     logger.info("=" * 60)
@@ -586,6 +975,12 @@ def generate_recommendations_streaming(
         logger.error(f"Campaign not found: {campaign}")
         raise ValueError(f"Campaign not found: {campaign}")
 
+    logger.info("Calculating date range...")
+    start_date, end_date, num_days = calculate_date_range(campaigns_df)
+    if start_date is None:
+        start_date, end_date, num_days = calculate_date_range(search_terms)
+    logger.info(f"  - Date range: {start_date or 'Unknown'} to {end_date or 'Unknown'} ({num_days} days)")
+
     logger.info("Computing metrics...")
     campaigns_df = normalize_metrics(campaigns_df)
 
@@ -597,6 +992,23 @@ def generate_recommendations_streaming(
     )
     if "budget_amount" in campaigns_df.columns:
         campaign_summary["budget_amount"] = campaigns_df["budget_amount"].fillna(0).iloc[0] if len(campaigns_df) > 0 else 0
+    
+    # Convert totals to daily averages
+    campaign_summary["spend_total"] = campaign_summary["spend"]
+    campaign_summary["sales_total"] = campaign_summary["sales"]
+    campaign_summary["clicks_total"] = campaign_summary["clicks"]
+    campaign_summary["impressions_total"] = campaign_summary["impressions"]
+    
+    campaign_summary["spend"] = campaign_summary["spend"] / num_days
+    campaign_summary["sales"] = campaign_summary["sales"] / num_days
+    campaign_summary["clicks"] = campaign_summary["clicks"] / num_days
+    campaign_summary["impressions"] = campaign_summary["impressions"] / num_days
+    
+    # Add date range info
+    campaign_summary["date_range_start"] = start_date or "Unknown"
+    campaign_summary["date_range_end"] = end_date or "Unknown"
+    campaign_summary["num_days"] = num_days
+    
     campaign_summary["ctr"] = (campaign_summary["clicks"] / campaign_summary["impressions"].replace(0, 1)) * 100
     campaign_summary["cvr"] = campaign_summary["sales"] / campaign_summary["clicks"].replace(0, 1)
     campaign_summary["acos"] = (campaign_summary["spend"] / campaign_summary["sales"].replace(0, 1)) * 100
@@ -619,10 +1031,23 @@ def generate_recommendations_streaming(
         logger.info(f"  - Budget: ${budget_amt:.2f}")
 
     logger.info("Analyzing keywords...")
-    keyword_rollup, best_keywords, worst_keywords = compute_keyword_metrics(
-        search_terms, min_impr=min_impr, top_n=top_n
+    targeting_data = reports.get("targeting", pd.DataFrame())
+    if targeting_data is not None and not targeting_data.empty:
+        targeting_camp_col = find_campaign_column(targeting_data)
+        targeting_data = targeting_data[targeting_data[targeting_camp_col].str.lower() == campaign_name]
+        logger.info(f"  - Targeting rows: {len(targeting_data)}")
+    else:
+        targeting_data = pd.DataFrame()
+    
+    keyword_rollup, best_keywords, worst_keywords, keyword_types, alignment_analysis = compute_keyword_metrics(
+        search_terms_df=search_terms,
+        targeting_df=targeting_data,
+        min_impr=min_impr,
+        top_n=top_n,
     )
     logger.info(f"  - Keywords: {len(keyword_rollup)} total, {len(best_keywords)} best, {len(worst_keywords)} worst")
+    logger.info(f"  - Well-aligned targeting: {len(alignment_analysis.get('well_aligned', []))}")
+    logger.info(f"  - Untargeted customer searches: {len(alignment_analysis.get('untargeted_searches', []))}")
 
     payload = {
         "campaign_summary": campaign_summary.to_dict("records"),
@@ -630,6 +1055,8 @@ def generate_recommendations_streaming(
         "keyword_rollup": keyword_rollup,
         "best_keywords": best_keywords,
         "worst_keywords": worst_keywords,
+        "keyword_types": keyword_types,
+        "alignment_analysis": alignment_analysis,
     }
 
     logger.info(f"Calling OpenAI API (model: {model}, streaming: true)...")

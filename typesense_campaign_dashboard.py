@@ -368,7 +368,7 @@ def main():
         )
         model_input = st.selectbox(
             "GPT Model",
-            options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+            options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-5-mini"],
             index=0,
         )
         
@@ -662,7 +662,7 @@ def main():
                             ts_protocol=os.getenv("TYPESENSE_PROTOCOL", "http"),
                             ts_api_key=os.getenv("TYPESENSE_API_KEY", "mykey"),
                             api_key=api_key,
-                            model=model_input or "gpt-4o-mini",
+                            model=model_input or "gpt-5-mini",
                             top_n=top_n,
                             min_impr=min_impr,
                         ):

@@ -9,3 +9,4 @@ typesense-data/
 *.pkl
 *.json
 *.xlsx
+.ipynb_checkpoints
