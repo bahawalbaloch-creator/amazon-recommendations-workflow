@@ -31,6 +31,7 @@ columns_to_extract = [
 # --- LOAD EXCEL ---
 try:
     df = pd.read_excel(input_file, sheet_name=sheet_name, engine='openpyxl')
+    df = df[df['Entity'] == 'Keyword']
 except Exception as e:
     print(f"Error reading Excel file: {e}")
     exit()

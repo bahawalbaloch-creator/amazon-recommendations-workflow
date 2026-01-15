@@ -1,0 +1,15 @@
+SP search_terms schema 
+date	portfolio_name	currency	campaign	ad_group	retailer	country	targeting	match_type	search_term	impressions	clicks	click-thru_rate_(ctr)	cost_per_click_(cpc)	spend	sales	total_advertising_cost_of_sales_(acos)	total_return_on_advertising_spend_(roas)	7_day_total_orders_(#)	7_day_total_units_(#)	7_day_conversion_rate	7_day_advertised_sku_units_(#)	7_day_other_sku_units_(#)	7_day_advertised_sku_sales	7_day_other_sku_sales
+
+SP budgets schema 
+start_date	end_date	portfolio_name	program_type	campaign	country	status	currency	budget	recommended_budget	average_time_in_budget	targeting_type	bidding_strategy	impressions	last_year_impressions	estimated_missed_impressions_range_min	estimated_missed_impressions_range_max	clicks	last_year_clicks	estimated_missed_clicks_range_min	estimated_missed_clicks_range_max	click-thru_rate_(ctr)	spend	last_year_spend	cost_per_click_(cpc)	last_year_cost_per_click_(cpc)	7_day_total_orders_(#)	total_advertising_cost_of_sales_(acos)	total_return_on_advertising_spend_(roas)	sales	estimated_missed_sales_range_min	estimated_missed_sales_range_max
+
+SP campaigns schema 
+start_date	end_date	portfolio_name	program_type	campaign	retailer	country	status	currency	budget	targeting_type	bidding_strategy	impressions	last_year_impressions	clicks	last_year_clicks	click-thru_rate_(ctr)	spend	last_year_spend	cost_per_click_(cpc)	last_year_cost_per_click_(cpc)	7_day_total_orders_(#)	total_advertising_cost_of_sales_(acos)	total_return_on_advertising_spend_(roas)	sales
+
+SP placement schema 
+start_date	end_date	portfolio_name	currency	campaign	retailer	country	bidding_strategy	placement	impressions	clicks	cost_per_click_(cpc)	spend	sales	total_advertising_cost_of_sales_(acos)	total_return_on_advertising_spend_(roas)	7_day_total_orders_(#)	7_day_total_units_(#)
+
+SP targeting schema 
+date	portfolio_name	currency	campaign	country	ad_group	retailer	targeting	match_type	impressions	top-of-search_impression_share	clicks	click-thru_rate_(ctr)	cost_per_click_(cpc)	spend	total_advertising_cost_of_sales_(acos)	total_return_on_advertising_spend_(roas)	sales	7_day_total_orders_(#)	7_day_total_units_(#)	7_day_conversion_rate	7_day_advertised_sku_units_(#)	7_day_other_sku_units_(#)	7_day_advertised_sku_sales	7_day_other_sku_sales
+
