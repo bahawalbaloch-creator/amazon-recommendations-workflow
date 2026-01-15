@@ -15,7 +15,7 @@ from code_interpreter_system_prompt import SYSTEM_PROMPT, ASSISTANT_PROMPT
 # Load environment variables early.
 load_dotenv()
 
-MODEL_DEFAULT = os.getenv("OPENAI_ASSISTANT_MODEL", "gpt-4o-mini")
+MODEL_DEFAULT = os.getenv("OPENAI_ASSISTANT_MODEL", "gpt-4.1-2025-04-14")
 
 # Tool definition for get_campaign_summary
 GET_CAMPAIGN_SUMMARY_TOOL = {
