@@ -36,6 +36,25 @@ GET_CAMPAIGN_SUMMARY_TOOL = {
     }
 }
 
+# Tool definition for get_keyword_recommendations
+GET_KEYWORD_RECOMMENDATIONS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_keyword_recommendations",
+        "description": "Analyze keyword performance to find new keywords to ADD (from high-performing customer search terms) and keywords to REMOVE (targeting keywords causing losses). Use this when: 1) User explicitly asks for keyword recommendations, 2) All keywords in campaign analysis are performing poorly, 3) User wants to discover new keyword opportunities.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "campaign_name": {
+                    "type": "string",
+                    "description": "The exact name of the campaign to analyze keywords for."
+                }
+            },
+            "required": ["campaign_name"]
+        }
+    }
+}
+
 
 @st.cache_resource
 def get_openai_client() -> OpenAI:
@@ -80,7 +99,7 @@ def create_or_update_assistant(
             name="Amazon Campaign Assistant",
             instructions=instructions.strip(),
             model=model,
-            tools=[GET_CAMPAIGN_SUMMARY_TOOL],
+            tools=[GET_CAMPAIGN_SUMMARY_TOOL, GET_KEYWORD_RECOMMENDATIONS_TOOL],
         )
         st.session_state.assistant_id = assistant.id
         st.session_state.assistant_prompt = instructions.strip()
@@ -215,6 +234,240 @@ def get_campaign_summary(db_path: str, campaign_name: str) -> Optional[Dict[str,
         return None
 
 
+def get_keyword_recommendations(db_path: str, campaign_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Analyze KeywordPerformance to find:
+    - 5 new keywords to ADD (high-performing customer_search_terms not in targeting)
+    - 5 keywords to REMOVE (targeting keywords causing losses)
+    
+    Returns detailed performance metrics and reasoning for each recommendation.
+    """
+    recommendations = {
+        "campaign_name": campaign_name,
+        "keywords_to_add": [],
+        "keywords_to_remove": [],
+        "summary": {}
+    }
+
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # Get all keyword performance data for the campaign
+        kw_perf = pd.read_sql_query(
+            """
+            SELECT 
+                targeting,
+                customer_search_term,
+                impressions,
+                clicks,
+                spend,
+                7_day_total_sales as sales,
+                "7_day_total_orders_#" as orders,
+                cost_per_click as cpc,
+                click_thru_rate as ctr
+            FROM KeywordPerformance 
+            WHERE campaign_name = ?
+            """,
+            conn,
+            params=(campaign_name,)
+        )
+
+        if kw_perf.empty:
+            conn.close()
+            return {
+                "error": f"No keyword data found for campaign: {campaign_name}",
+                "suggestion": "Check campaign name or ensure data exists in KeywordPerformance table."
+            }
+
+        # Convert percentages if needed (CTR might be stored as decimal or percentage)
+        if kw_perf['ctr'].max() < 1:
+            kw_perf['ctr'] = kw_perf['ctr'] * 100
+
+        # Calculate ACOS and ROAS
+        kw_perf['acos'] = (kw_perf['spend'] / kw_perf['sales'].replace(0, 0.001)) * 100
+        kw_perf['roas'] = kw_perf['sales'] / kw_perf['spend'].replace(0, 0.001)
+
+        # Handle infinite values
+        kw_perf['acos'] = kw_perf['acos'].replace([float('inf'), -float('inf')], 999)
+        kw_perf['roas'] = kw_perf['roas'].replace([float('inf'), -float('inf')], 0)
+
+        # ============================================
+        # KEYWORDS TO ADD: High-performing customer search terms
+        # ============================================
+        # Aggregate by customer_search_term to find winning search terms
+        search_term_agg = kw_perf.groupby('customer_search_term').agg(
+            impressions=('impressions', 'sum'),
+            clicks=('clicks', 'sum'),
+            spend=('spend', 'sum'),
+            sales=('sales', 'sum'),
+            orders=('orders', 'sum')
+        ).reset_index()
+
+        # Recalculate metrics after aggregation
+        search_term_agg['ctr'] = (search_term_agg['clicks'] / search_term_agg['impressions'].replace(0, 1)) * 100
+        search_term_agg['cpc'] = search_term_agg['spend'] / search_term_agg['clicks'].replace(0, 1)
+        search_term_agg['acos'] = (search_term_agg['spend'] / search_term_agg['sales'].replace(0, 0.001)) * 100
+        search_term_agg['roas'] = search_term_agg['sales'] / search_term_agg['spend'].replace(0, 0.001)
+        search_term_agg['cvr'] = (search_term_agg['orders'] / search_term_agg['clicks'].replace(0, 1)) * 100
+
+        # Handle infinite values
+        search_term_agg['acos'] = search_term_agg['acos'].replace([float('inf'), -float('inf')], 999)
+        search_term_agg['roas'] = search_term_agg['roas'].replace([float('inf'), -float('inf')], 0)
+
+        # Get existing targeting keywords
+        existing_targets = set(kw_perf['targeting'].dropna().str.lower().unique())
+
+        # Filter: search terms that are NOT already targeted and have good performance
+        # Criteria: impressions >= 10, has orders, ROAS > 1.5
+        potential_adds = search_term_agg[
+            (search_term_agg['impressions'] >= 10) &
+            (search_term_agg['orders'] > 0) &
+            (search_term_agg['roas'] > 1.5) &
+            (~search_term_agg['customer_search_term'].str.lower().isin(existing_targets))
+        ].copy()
+
+        # Score for ranking: prioritize ROAS, orders, and impressions
+        potential_adds['add_score'] = (
+            potential_adds['roas'] * 2 +
+            potential_adds['orders'] * 3 +
+            (potential_adds['impressions'] / 100)
+        )
+
+        # Get top 5 keywords to add
+        top_adds = potential_adds.nlargest(5, 'add_score')
+
+        for _, row in top_adds.iterrows():
+            reasoning = []
+            if row['roas'] > 3:
+                reasoning.append(f"Excellent ROAS of {row['roas']:.2f}x")
+            elif row['roas'] > 2:
+                reasoning.append(f"Good ROAS of {row['roas']:.2f}x")
+            else:
+                reasoning.append(f"Positive ROAS of {row['roas']:.2f}x")
+            
+            if row['orders'] >= 5:
+                reasoning.append(f"Strong conversion with {int(row['orders'])} orders")
+            else:
+                reasoning.append(f"Converting with {int(row['orders'])} orders")
+            
+            if row['acos'] < 25:
+                reasoning.append(f"Low ACOS at {row['acos']:.1f}%")
+            
+            recommendations["keywords_to_add"].append({
+                "keyword": row['customer_search_term'],
+                "impressions": int(row['impressions']),
+                "clicks": int(row['clicks']),
+                "spend": round(row['spend'], 2),
+                "sales": round(row['sales'], 2),
+                "orders": int(row['orders']),
+                "ctr": round(row['ctr'], 2),
+                "cpc": round(row['cpc'], 2),
+                "acos": round(row['acos'], 2),
+                "roas": round(row['roas'], 2),
+                "cvr": round(row['cvr'], 2),
+                "reasoning": " | ".join(reasoning),
+                "recommendation": "ADD as Exact Match targeting keyword"
+            })
+
+        # ============================================
+        # KEYWORDS TO REMOVE: Targeting keywords causing losses
+        # ============================================
+        # Aggregate by targeting keyword
+        targeting_agg = kw_perf.groupby('targeting').agg(
+            impressions=('impressions', 'sum'),
+            clicks=('clicks', 'sum'),
+            spend=('spend', 'sum'),
+            sales=('sales', 'sum'),
+            orders=('orders', 'sum')
+        ).reset_index()
+
+        # Recalculate metrics
+        targeting_agg['ctr'] = (targeting_agg['clicks'] / targeting_agg['impressions'].replace(0, 1)) * 100
+        targeting_agg['cpc'] = targeting_agg['spend'] / targeting_agg['clicks'].replace(0, 1)
+        targeting_agg['acos'] = (targeting_agg['spend'] / targeting_agg['sales'].replace(0, 0.001)) * 100
+        targeting_agg['roas'] = targeting_agg['sales'] / targeting_agg['spend'].replace(0, 0.001)
+        targeting_agg['cvr'] = (targeting_agg['orders'] / targeting_agg['clicks'].replace(0, 1)) * 100
+
+        # Handle infinite values
+        targeting_agg['acos'] = targeting_agg['acos'].replace([float('inf'), -float('inf')], 999)
+        targeting_agg['roas'] = targeting_agg['roas'].replace([float('inf'), -float('inf')], 0)
+
+        # Filter: targeting keywords that are bleeding money
+        # Criteria: impressions >= 10 AND (spend > $5 with no sales OR ACOS > 50%)
+        potential_removes = targeting_agg[
+            (targeting_agg['impressions'] >= 10) &
+            (
+                ((targeting_agg['spend'] > 5) & (targeting_agg['sales'] == 0)) |
+                (targeting_agg['acos'] > 50)
+            )
+        ].copy()
+
+        # Score for ranking: prioritize high spend with low/no return
+        potential_removes['remove_score'] = (
+            potential_removes['spend'] * 2 +
+            (potential_removes['acos'] / 10) -
+            (potential_removes['orders'] * 10)
+        )
+
+        # Get top 5 keywords to remove
+        top_removes = potential_removes.nlargest(5, 'remove_score')
+
+        for _, row in top_removes.iterrows():
+            reasoning = []
+            if row['sales'] == 0 and row['spend'] > 0:
+                reasoning.append(f"💸 Spent ${row['spend']:.2f} with ZERO sales")
+                action = "PAUSE immediately - bleeding money"
+            elif row['acos'] > 100:
+                reasoning.append(f"🔴 ACOS of {row['acos']:.1f}% (spending more than earning)")
+                action = "PAUSE or significantly reduce bid"
+            elif row['acos'] > 50:
+                reasoning.append(f"⚠️ High ACOS of {row['acos']:.1f}%")
+                action = "Reduce bid by 30-50% or add as negative"
+            else:
+                reasoning.append(f"Underperforming with ACOS {row['acos']:.1f}%")
+                action = "Review and consider pausing"
+            
+            if row['clicks'] > 10 and row['orders'] == 0:
+                reasoning.append(f"No conversions from {int(row['clicks'])} clicks")
+            
+            if row['ctr'] < 0.5 and row['impressions'] > 100:
+                reasoning.append(f"Very low CTR ({row['ctr']:.2f}%) - poor relevance")
+
+            recommendations["keywords_to_remove"].append({
+                "keyword": row['targeting'],
+                "impressions": int(row['impressions']),
+                "clicks": int(row['clicks']),
+                "spend": round(row['spend'], 2),
+                "sales": round(row['sales'], 2),
+                "orders": int(row['orders']),
+                "ctr": round(row['ctr'], 2),
+                "cpc": round(row['cpc'], 2),
+                "acos": round(row['acos'], 2) if row['acos'] < 999 else "∞ (no sales)",
+                "roas": round(row['roas'], 2),
+                "cvr": round(row['cvr'], 2),
+                "reasoning": " | ".join(reasoning),
+                "recommendation": action
+            })
+
+        # Summary statistics
+        recommendations["summary"] = {
+            "total_search_terms_analyzed": len(search_term_agg),
+            "total_targeting_keywords_analyzed": len(targeting_agg),
+            "keywords_recommended_to_add": len(recommendations["keywords_to_add"]),
+            "keywords_recommended_to_remove": len(recommendations["keywords_to_remove"]),
+            "potential_monthly_savings": round(top_removes['spend'].sum(), 2) if not top_removes.empty else 0,
+            "note": "Keywords to ADD are customer search terms converting well but not explicitly targeted. Keywords to REMOVE are targeting keywords that drain budget without returns."
+        }
+
+        conn.close()
+        return recommendations
+
+    except sqlite3.Error as e:
+        return {"error": f"Database error: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Error analyzing keywords: {e}"}
+
+
 def handle_tool_calls(
     client: OpenAI,
     thread_id: str,
@@ -250,6 +503,29 @@ def handle_tool_calls(
                 "tool_call_id": tool_call.id,
                 "output": output
             })
+        
+        elif function_name == "get_keyword_recommendations":
+            campaign_name = arguments.get("campaign_name", "")
+            st.info(f"🔎 Analyzing keywords for campaign: {campaign_name}")
+            
+            result = get_keyword_recommendations(db_path, campaign_name)
+            
+            if result and "error" not in result:
+                adds = len(result.get("keywords_to_add", []))
+                removes = len(result.get("keywords_to_remove", []))
+                st.success(f"✅ Found {adds} keywords to ADD, {removes} keywords to REMOVE")
+                output = json.dumps(result, indent=2, default=str)
+            else:
+                output = json.dumps(result if result else {
+                    "error": f"Could not analyze keywords for campaign: {campaign_name}",
+                    "suggestion": "Please check the campaign name or ensure data exists."
+                })
+            
+            tool_outputs.append({
+                "tool_call_id": tool_call.id,
+                "output": output
+            })
+        
         else:
             tool_outputs.append({
                 "tool_call_id": tool_call.id,
