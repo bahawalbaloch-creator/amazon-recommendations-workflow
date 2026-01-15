@@ -10,3 +10,4 @@ typesense-data/
 *.json
 *.xlsx
 .ipynb_checkpoints
+*.db
