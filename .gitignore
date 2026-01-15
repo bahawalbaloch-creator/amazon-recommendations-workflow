@@ -11,3 +11,4 @@ typesense-data/
 *.xlsx
 .ipynb_checkpoints
 *.db
+ads_data
