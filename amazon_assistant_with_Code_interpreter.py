@@ -99,7 +99,7 @@ def ensure_thread(client: OpenAI) -> str:
 def get_campaign_summary(db_path: str, campaign_name: str) -> Optional[Dict[str, Any]]:
     """
     Returns a campaign summary:
-    - campaign performance
+    - campaign performance (includes average_time_in_budget - % of time campaign had budget)
     - campaign info
     - aggregated keyword performance
     - bid from keyword_ad_performance

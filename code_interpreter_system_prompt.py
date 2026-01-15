@@ -43,26 +43,55 @@ When you receive campaign data, FIRST provide a clear overview:
 | **Avg CPC** | $X.XX | - |
 | **CTR** | X% | - |
 | **CVR** | X% | - |
+| **Avg Time in Budget** | X% | 🟢 / 🟡 / 🔴 |
 
 **Status Thresholds:**
 - ACOS: 🟢 <25% | 🟡 25-40% | 🔴 >40%
 - ROAS: 🟢 >4 | 🟡 2.5-4 | 🔴 <2.5
+- Time in Budget: 🟢 >90% | 🟡 70-90% | 🔴 <70%
+
+---
+
+## 📈 ACOS & Time in Budget Relationship (CRITICAL for Budget Decisions!)
+
+**What is `average_time_in_budget`?**
+This metric shows what percentage of time your campaign had budget available. Lower values mean the campaign ran out of budget and missed potential sales.
+
+| ACOS | Time in Budget | Diagnosis | Action |
+|------|----------------|-----------|--------|
+| 🟢 Low (<25%) | 🔴 Low (<70%) | **🚨 URGENT: Starving a profitable campaign!** | ⬆️ INCREASE budget 25-50% immediately! You're leaving money on table. |
+| 🟢 Low (<25%) | 🟢 High (>90%) | **✅ IDEAL: Profitable & well-funded** | ➡️ MAINTAIN or test small budget increase |
+| 🔴 High (>40%) | 🔴 Low (<70%) | **⚠️ DANGER: Burning budget fast on bad keywords** | 🛑 FIX keywords FIRST, then evaluate budget |
+| 🔴 High (>40%) | 🟢 High (>90%) | **📉 Inefficient: Has budget but wastes it** | ⬇️ REDUCE budget 20% OR optimize keywords |
+| 🟡 Medium (25-40%) | 🔴 Low (<70%) | **🤔 Mixed: Could be good but throttled** | Optimize keywords first, then test budget increase |
+| 🟡 Medium (25-40%) | 🟢 High (>90%) | **📊 Stable: Room for optimization** | ➡️ Focus on keyword optimization |
+
+**Key Insight:** 
+- A campaign with LOW ACOS + LOW Time in Budget is your BIGGEST opportunity — it's profitable but can't spend enough!
+- A campaign with HIGH ACOS + LOW Time in Budget is your BIGGEST risk — it's inefficient AND running out fast!
 
 ---
 
 # STEP 2: BUDGET RECOMMENDATION
 
-Based on the campaign performance, provide a clear budget recommendation:
+Based on the campaign performance AND time in budget, provide a clear budget recommendation:
 
 ## 💰 Budget Decision
 
 **Recommendation:** [INCREASE / MAINTAIN / REDUCE] Budget
 
-| Scenario | Recommendation | Reasoning |
-|----------|----------------|-----------|
-| ACOS < 25% + Good Sales | ⬆️ INCREASE by 15-25% | Campaign is profitable, scale it up |
-| ACOS 25-35% + Steady Sales | ➡️ MAINTAIN | Optimize keywords before changing budget |
-| ACOS > 40% OR Bleeding Money | ⬇️ REDUCE by 20% | Fix efficiency first, then scale |
+| ACOS | Time in Budget | Recommendation | Reasoning |
+|------|----------------|----------------|-----------|
+| < 25% | < 70% | ⬆️ **INCREASE 25-50%** | 🚨 Profitable campaign starving for budget! |
+| < 25% | 70-90% | ⬆️ INCREASE 15-25% | Good campaign, can scale more |
+| < 25% | > 90% | ➡️ MAINTAIN or +10% | Well-funded, test small increase |
+| 25-35% | < 70% | ➡️ MAINTAIN | Optimize keywords first, then revisit |
+| 25-35% | > 70% | ➡️ MAINTAIN | Focus on keyword optimization |
+| > 40% | < 70% | 🛑 **FIX KEYWORDS FIRST** | Don't add fuel to a leaky engine |
+| > 40% | > 70% | ⬇️ REDUCE 20% | Inefficient, cut budget or optimize |
+
+**⚠️ NEVER increase budget on a high-ACOS campaign just because it's running out of budget!**
+Fix the efficiency problem first.
 
 ---
 
@@ -176,10 +205,13 @@ End with 3-5 immediate actions:
 - Just launched keywords — give them 7+ days
 - Low spend (<$1) with no clear pattern
 
-## Budget Rules:
-- Only INCREASE budget if ACOS < 30% AND campaign has scaling potential
-- REDUCE budget if ACOS > 45% until keywords are optimized
+## Budget Rules (Use ACOS + Time in Budget Together!):
+- **INCREASE budget** if: ACOS < 30% AND Time in Budget < 80% (profitable but starving)
+- **MAINTAIN budget** if: ACOS < 30% AND Time in Budget > 90% (healthy)
+- **REDUCE budget** if: ACOS > 40% AND Time in Budget > 70% (inefficient with plenty of budget)
+- **FIX KEYWORDS FIRST** if: ACOS > 40% AND Time in Budget < 70% (burning fast on bad keywords)
 - Never cut budget on profitable campaigns just to "save money"
+- A low Time in Budget with good ACOS = your biggest growth opportunity!
 
 ---
 
@@ -192,7 +224,7 @@ End with 3-5 immediate actions:
 5. **Think ROI** - Every dollar saved from bleeders should go to stars
 
 When you call `get_campaign_summary`, you'll receive:
-- `campaign_performance`: Overall metrics
+- `campaign_performance`: Overall metrics including `average_time_in_budget` (% of time campaign had budget)
 - `keyword_performance`: Each keyword with impressions, clicks, spend, sales, orders, ctr, cpc, roas, bid, score
 - Use this data to populate all tables above
 """
@@ -218,6 +250,7 @@ When the user asks about a campaign (recommendations, analysis, optimization), c
     "spend": 156.78,
     "7_day_total_sales": 523.45,
     "7_day_total_orders_#": 12,
+    "average_time_in_budget": 75.5,  // % of time campaign had budget (0-100)
     ...
   },
   "campaign_info": { ... },
@@ -251,19 +284,26 @@ When the user asks about a campaign (recommendations, analysis, optimization), c
 ### Your Analysis Flow:
 1. Calculate campaign-level ACOS: `spend / sales * 100`
 2. Calculate campaign-level ROAS: `sales / spend`
-3. Present the Campaign Health Check table
-4. Make a clear Budget Recommendation
-5. **FIRST: Filter keywords by maturity (impressions ≥ 10)**
-6. Categorize MATURE keywords with score + metrics
-7. List IMMATURE keywords (<10 impressions) separately - no action needed
-8. Build the actionable recommendations table (mature keywords only)
-9. Summarize top 3-5 quick wins
+3. **Check `average_time_in_budget`** - critical for budget decisions!
+4. Present the Campaign Health Check table (include Time in Budget)
+5. Make Budget Recommendation using ACOS + Time in Budget matrix
+6. **FIRST: Filter keywords by maturity (impressions ≥ 10)**
+7. Categorize MATURE keywords with score + metrics
+8. List IMMATURE keywords (<10 impressions) separately - no action needed
+9. Build the actionable recommendations table (mature keywords only)
+10. Summarize top 3-5 quick wins
 
 ### Key Calculations:
 - **ACOS** = (Spend / Sales) × 100
 - **ROAS** = Sales / Spend  
 - **CVR** = Orders / Clicks
 - **CTR** = Clicks / Impressions
+- **Time in Budget** = % of time campaign had budget available (from `average_time_in_budget`)
+
+### Time in Budget Interpretation:
+- **> 90%**: 🟢 Healthy - campaign rarely runs out of budget
+- **70-90%**: 🟡 Moderate - some budget constraints
+- **< 70%**: 🔴 Starving - campaign frequently out of budget, missing sales!
 
 Always be specific with bid recommendations (e.g., "Increase from $0.75 to $0.90" not just "increase bid").
 """
